@@ -215,7 +215,7 @@ function circleStroke(b, k, rnd) {
  *   regions:  output of regionsFor (bounds are recomputed from current elements)
  *   place(wd, ht, anchorBounds) -> {x, y}: free-space finder for notes
  */
-export function renderInk({ commands, regions, elementsById, userStrokeSize, userFontSize, place, groupId, meta, seed }) {
+export function renderInk({ commands, regions, elementsById, userStrokeSize, userFontSize, place, groupId, meta, seed, writeAnchor }) {
   const rnd = rng(seed);
   const k = Math.max(0.8, Math.min(3, (userStrokeSize || 3) / 3));
   const desc = { ...penDescriptor("fountain", PRESETS.fountain), size: 3.2 * k, thinning: 0.45, taperStart: 4 * k, taperEnd: 10 * k, smoothing: 0.6, streamline: 0.35 };
@@ -235,23 +235,41 @@ export function renderInk({ commands, regions, elementsById, userStrokeSize, use
     const pressures = pts.map((_, i) => 0.45 + 0.3 * Math.sin((Math.PI * (i + 0.5)) / n));
     out.push(makeFreedraw({ points: pts, pressures, desc, color: INK_COLOR, customData, groupIds: [groupId] }));
   };
-  const note = (text, anchor, leader = true) => {
+  // Notes are queued, merged per target (one list, one leader arrow) and laid out at the end.
+  const requests = [];
+  const note = (text, anchor, leader = true, key = null) => {
     text = String(text || "").trim();
-    if (!text) return;
+    if (text) requests.push({ key: key || `#${requests.length}`, text, anchor, leader });
+  };
+  const keyOf = (id) => `R:${String(id || "").trim().toUpperCase()}`;
+
+  const layoutNotes = () => {
+    const groups = new Map();
+    for (const r of requests) {
+      const g = groups.get(r.key);
+      if (g) {
+        if (!g.texts.includes(r.text)) g.texts.push(r.text);
+        g.anchor = union(g.anchor, r.anchor);
+        g.leader ||= r.leader;
+      } else groups.set(r.key, { ...r, texts: [r.text] });
+    }
     const fontSize = Math.round(Math.max(18 * k, Math.min(72, (userFontSize || 20) * 0.95)));
-    const wrapped = wrap(text, 28);
-    let [t] = convertToExcalidrawElements([
-      { type: "text", x: 0, y: 0, text: wrapped, fontSize, fontFamily: FONT_FAMILY.Excalifont, strokeColor: INK_COLOR },
-    ]);
-    const spot = place(t.width, t.height, anchor, [...out, ...placed]);
-    t = { ...t, x: spot.x, y: spot.y, groupIds: [groupId], customData };
-    placed.push(t);
-    if (leader) {
-      const nb = { minX: t.x, minY: t.y, maxX: t.x + t.width, maxY: t.y + t.height };
-      const acx = (anchor.minX + anchor.maxX) / 2, acy = (anchor.minY + anchor.maxY) / 2;
-      const from = edgePoint(nb, acx, acy, 6 * k);
-      const to = edgePoint(anchor, from[0], from[1], 10 * k);
-      if (Math.hypot(to[0] - from[0], to[1] - from[1]) > 25 * k) arrowStrokes(from, to, k, rnd, 0.12).forEach(stroke);
+    for (const g of groups.values()) {
+      const isWrite = g.key === "write";
+      const body = isWrite ? g.texts.join("\n\n") : g.texts.length > 1 ? g.texts.map((t) => `• ${t}`).join("\n") : g.texts[0];
+      let [t] = convertToExcalidrawElements([
+        { type: "text", x: 0, y: 0, text: wrap(body, isWrite ? 38 : 30), fontSize, fontFamily: FONT_FAMILY.Excalifont, strokeColor: INK_COLOR, lineHeight: 1.3 },
+      ]);
+      const spot = place(t.width, t.height, g.anchor, [...out, ...placed]);
+      t = { ...t, x: spot.x, y: spot.y, groupIds: [groupId], customData };
+      placed.push(t);
+      if (g.leader || (g.texts.length > 1 && !isWrite)) {
+        const nb = { minX: t.x, minY: t.y, maxX: t.x + t.width, maxY: t.y + t.height };
+        const acx = (g.anchor.minX + g.anchor.maxX) / 2, acy = (g.anchor.minY + g.anchor.maxY) / 2;
+        const from = edgePoint(nb, acx, acy, 6 * k);
+        const to = edgePoint(g.anchor, from[0], from[1], 10 * k);
+        if (Math.hypot(to[0] - from[0], to[1] - from[1]) > 25 * k) arrowStrokes(from, to, k, rnd, 0.12).forEach(stroke);
+      }
     }
   };
 
@@ -261,7 +279,11 @@ export function renderInk({ commands, regions, elementsById, userStrokeSize, use
     try {
       if (act === "note") {
         const b = regionBounds(c.near || c.target);
-        if (b) note(label, b, true);
+        if (b) note(label, b, true, keyOf(c.near || c.target));
+        continue;
+      }
+      if (act === "write" || act === "explain") {
+        if (writeAnchor) requests.push({ key: "write", text: String(label || "").trim(), anchor: writeAnchor, leader: false });
         continue;
       }
       if (act === "arrow" || act === "connect") {
@@ -322,27 +344,35 @@ export function renderInk({ commands, regions, elementsById, userStrokeSize, use
       if (label) {
         const markOnly = ["check", "tick", "cross", "wrong", "bracket"].includes(act);
         const drawn = out.slice(before);
-        note(label, markOnly && drawn.length ? boundsOf(drawn) : b, !markOnly);
+        const key = Array.isArray(c.targets) ? `T:${c.targets.join(",")}` : keyOf(c.target);
+        note(label, markOnly && drawn.length ? boundsOf(drawn) : b, !markOnly, key);
       }
     } catch (e) {
       console.warn("ink command failed", c, e);
     }
   }
+  layoutNotes();
   return [...out, ...placed];
 }
 
 function wrap(text, width) {
-  const words = text.split(/\s+/);
-  const lines = [];
-  let line = "";
-  for (const wd of words) {
-    if (line && (line + " " + wd).length > width) {
+  return text
+    .split("\n")
+    .map((para) => {
+      const bullet = /^(•|-|\d+\.)\s/.exec(para);
+      const indent = bullet ? " ".repeat(bullet[0].length + 1) : "";
+      const lines = [];
+      let line = "";
+      for (const wd of para.split(/\s+/).filter(Boolean)) {
+        if (line && (line + " " + wd).length > width) {
+          lines.push(line);
+          line = indent + wd;
+        } else line = line ? line + " " + wd : wd;
+      }
       lines.push(line);
-      line = wd;
-    } else line = line ? line + " " + wd : wd;
-  }
-  if (line) lines.push(line);
-  return lines.join("\n");
+      return lines.join("\n");
+    })
+    .join("\n");
 }
 
 // ------------------------------------------------------------ layer -----

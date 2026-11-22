@@ -11,7 +11,16 @@ npm start          # builds the app, then serves it at http://127.0.0.1:3311
 # or: npm run dev  # Vite dev server with hot reload at http://127.0.0.1:5173 (the API is built in)
 ```
 
-Boards autosave to `data/boards/<name>.excalidraw`. Use `?board=name` in the URL to switch boards.
+## Boards
+
+Click the board name at the top left (or ☰ → *Boards…*) to see all your boards with thumbnails. From there you can
+search, create a **new board**, open one, or **rename** (double-click the name), **duplicate** or **delete** a board.
+Deleted boards are moved to `data/trash/`, not erased.
+
+Boards save automatically. The dot next to the name shows the state (green: saved, orange: saving, red: the server
+can't be reached). **Ctrl+S** saves immediately. Each board is a plain Excalidraw file at
+`data/boards/<id>.excalidraw`, with its title and thumbnail beside it. The app reopens on the last board you used;
+`?board=<id>` in the URL opens a specific one. To save to or open a file anywhere else, use ☰ → *Save to…* or *Open*.
 
 ## Pens (dock on the right, Alt+1…8)
 

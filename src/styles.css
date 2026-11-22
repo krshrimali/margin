@@ -99,3 +99,27 @@ hr { border: 0; border-top: 1px solid var(--wb-border); margin: 8px 0; }
 .ink-row span { flex: 1; }
 .link.danger { color: #e03131; }
 kbd { font: 10px ui-monospace, monospace; padding: 0 3px; border: 1px solid var(--wb-border); border-radius: 3px; opacity: .7; }
+
+/* ---------------- boards ---------------- */
+.boards { position: fixed; left: 64px; top: 16px; z-index: 7; }
+.board-pill { display: flex; align-items: center; gap: 8px; height: 36px; max-width: 320px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--wb-bg); color: var(--wb-fg); box-shadow: var(--wb-shadow); cursor: pointer; font: 500 14px system-ui, sans-serif; }
+.board-pill:hover { background: var(--wb-hover); }
+.board-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.board-pill .caret { opacity: .5; font-size: 11px; }
+.save-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #2f9e44; transition: background .2s; }
+.save-dot.saving, .save-dot.unsaved { background: #f08c00; }
+.save-dot.error { background: #e03131; }
+.boards-panel { margin-top: 8px; width: min(560px, calc(100vw - 90px)); max-height: 74vh; overflow: auto; padding: 12px; border-radius: 10px; background: var(--wb-bg); color: var(--wb-fg); box-shadow: var(--wb-shadow); font-size: 13px; }
+.boards-head, .new-row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.boards-head input, .new-row input, .board-card input.rename { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--wb-border); background: var(--wb-bg); color: var(--wb-fg); font: inherit; }
+.boards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+.board-card { border: 1px solid var(--wb-border); border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 3px; }
+.board-card.current { border-color: #6741d9; box-shadow: 0 0 0 1px #6741d9; }
+.board-card .thumb { height: 96px; border: 0; border-radius: 5px; background: #fff; cursor: pointer; padding: 0; overflow: hidden; display: grid; place-items: center; }
+.board-card .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.board-card .thumb .empty { color: #999; font-size: 12px; }
+.board-card.current .thumb { cursor: default; }
+.board-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text; }
+.board-meta { opacity: .6; font-size: 11px; }
+.board-actions { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+@media (max-width: 900px) { .board-pill { max-width: 160px; } }

@@ -8,7 +8,7 @@ import {
   FONT_FAMILY,
   ROUNDNESS,
 } from "@excalidraw/excalidraw";
-import { regionsFor, markElements, renderInk } from "./ink.js";
+import { regionsFor, markElements, renderInk, INK_COLOR } from "./ink.js";
 
 export const SCOPES = {
   auto: "Auto",
@@ -310,10 +310,155 @@ function cardElements({ header, body, groupId, pending, meta }) {
   return [tag(head, "header"), tag(bg, "bg"), tag(holder, "holder"), tag(text, "text")];
 }
 
-async function diagramElements(mermaid) {
+// ------------------------------------------------------------ diagrams ----
+// Mermaid → Excalidraw conversion can overlap labels (subgraph titles, long
+// edge labels). Try progressively simpler variants and keep the cleanest.
+
+/** Remove subgraph wrappers so their members become ordinary nodes. */
+function flattenSubgraphs(src) {
+  return src
+    .split("\n")
+    .filter((l) => !/^\s*subgraph\b/i.test(l) && !/^\s*end\s*$/i.test(l) && !/^\s*direction\s+\w+\s*$/i.test(l))
+    .join("\n");
+}
+
+/** Keep edge labels to a few words: |a long label| and -- a long label --> forms. */
+function shortenEdgeLabels(src, max = 18) {
+  const cut = (t) => {
+    t = t.trim();
+    if (t.length <= max) return t;
+    const words = t.split(/\s+/);
+    let out = "";
+    for (const w of words) {
+      if ((out + " " + w).trim().length > max) break;
+      out = (out + " " + w).trim();
+    }
+    return out || t.slice(0, max);
+  };
+  return src.replace(/\|([^|]+)\|/g, (_, t) => `|${cut(t)}|`);
+}
+
+function setDirection(src, dir) {
+  return /^\s*(flowchart|graph)\s+\w+/im.test(src) ? src.replace(/^(\s*(?:flowchart|graph))\s+\w+/im, `$1 ${dir}`) : src;
+}
+
+/** Count overlapping labels and partially overlapping shapes. 0 = clean. */
+function overlapScore(els) {
+  const box = (e) => ({ minX: e.x, minY: e.y, maxX: e.x + e.width, maxY: e.y + e.height });
+  const inter = (a, b) => Math.max(0, Math.min(a.maxX, b.maxX) - Math.max(a.minX, b.minX)) * Math.max(0, Math.min(a.maxY, b.maxY) - Math.max(a.minY, b.minY));
+  const area = (a) => (a.maxX - a.minX) * (a.maxY - a.minY);
+  const texts = els.filter((e) => e.type === "text").map(box);
+  const shapes = els.filter((e) => ["rectangle", "diamond", "ellipse"].includes(e.type)).map(box);
+  let score = 0;
+  for (let i = 0; i < texts.length; i++) for (let j = i + 1; j < texts.length; j++) if (inter(texts[i], texts[j]) > 12) score += 2;
+  for (let i = 0; i < shapes.length; i++)
+    for (let j = i + 1; j < shapes.length; j++) {
+      const o = inter(shapes[i], shapes[j]);
+      const nested = o >= 0.98 * Math.min(area(shapes[i]), area(shapes[j]));
+      if (o > 12 && !nested) score += 1;
+    }
+  // arrows crossing each other or running through labels
+  const segs = els
+    .filter((e) => e.type === "arrow" || e.type === "line")
+    .map((e) => {
+      const pts = e.points.map(([x, y]) => [e.x + x, e.y + y]);
+      return pts.slice(1).map((p, i) => [pts[i], p]);
+    });
+  const cross = ([a, b], [c, d]) => {
+    const den = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0]);
+    if (Math.abs(den) < 1e-9) return false;
+    const t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / den;
+    const u = ((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) / den;
+    return t > 0.08 && t < 0.92 && u > 0.08 && u < 0.92; // ignore touching at endpoints
+  };
+  for (let i = 0; i < segs.length; i++)
+    for (let j = i + 1; j < segs.length; j++)
+      if (segs[i].some((s1) => segs[j].some((s2) => cross(s1, s2)))) score += 1;
+  const hitsBox = ([a, b], r) => {
+    for (let t = 0.1; t < 0.9; t += 0.1) {
+      const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+      if (x > r.minX + 2 && x < r.maxX - 2 && y > r.minY + 2 && y < r.maxY - 2) return true;
+    }
+    return false;
+  };
+  const labelBoxes = els.filter((e) => e.type === "text" && !els.some((a) => a.type === "arrow" && a.id === e.containerId)).map(box);
+  for (const arrow of segs) if (labelBoxes.some((r) => arrow.some((sg) => hitsBox(sg, r)))) score += 1;
+  return score;
+}
+
+async function diagramElements(mermaid, { quick = false } = {}) {
   const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
-  const { elements, files } = await parseMermaidToExcalidraw(mermaid, { themeVariables: { fontSize: "16px" } });
-  return { elements: convertToExcalidrawElements(elements, { regenerateIds: true }), files };
+  const src = mermaid.trim();
+  const flat = shortenEdgeLabels(flattenSubgraphs(src));
+  const variants = quick ? [src] : [src, shortenEdgeLabels(src), flat, setDirection(flat, "TD"), setDirection(flat, "LR")];
+  let best = null;
+  for (const v of [...new Set(variants)]) {
+    try {
+      const { elements, files } = await parseMermaidToExcalidraw(v, { themeVariables: { fontSize: "16px" } });
+      const els = convertToExcalidrawElements(elements, { regenerateIds: true });
+      const score = overlapScore(els);
+      if (!best || score < best.score) best = { elements: els, files, score, variant: v };
+      if (score === 0) break;
+    } catch (e) {
+      console.warn("mermaid variant failed", e);
+    }
+  }
+  if (!best) throw new Error("could not convert the diagram");
+  return best;
+}
+
+// Suggested diagrams are drawn by hand in Claude's ink colour.
+const inkStyle = (e) => (e.type === "text" ? { strokeColor: INK_COLOR } : { strokeColor: INK_COLOR, roughness: 1, backgroundColor: "transparent", fillStyle: "solid" });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Draw Claude's ink the way a hand would: each stroke is traced out and each
+ * note is written letter by letter. Temporary copies are animated (not saved,
+ * not in undo history); the real ink is then added in one undoable step.
+ */
+async function animateInk(api, ink) {
+  const isAnim = (e) => e.customData?.inkAnim;
+  const put = (els) =>
+    api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !isAnim(e)), ...els], captureUpdate: CaptureUpdateAction.NEVER });
+  const anim = (el, patch, v) => ({
+    ...el, ...patch, id: `anim-${el.id}`, version: v, versionNonce: Math.floor(Math.random() * 2 ** 31),
+    customData: { ...el.customData, inkAnim: true, claudePending: true },
+  });
+  const done = [];
+  let v = 1;
+  try {
+    for (const el of ink) {
+      if (el.type === "freedraw") {
+        const n = el.points.length;
+        const steps = Math.min(16, Math.max(5, Math.round(n / 6)));
+        for (let s = 1; s <= steps; s++) {
+          const m = Math.max(2, Math.round((n * s) / steps));
+          const pts = el.points.slice(0, m);
+          const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+          put([...done, anim(el, {
+            points: pts, pressures: el.pressures.length ? el.pressures.slice(0, m) : [], lastCommittedPoint: null,
+            width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys),
+          }, ++v)]);
+          await sleep(16);
+        }
+      } else if (el.type === "text") {
+        const full = el.text;
+        const step = Math.max(1, Math.ceil(full.length / 45));
+        for (let k = step; k < full.length + step; k += step) {
+          const t = full.slice(0, k);
+          put([...done, anim(el, { text: t, originalText: t }, ++v)]);
+          await sleep(22);
+        }
+      }
+      done.push(anim(el, {}, ++v));
+    }
+  } finally {
+    api.updateScene({
+      elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !isAnim(e)), ...ink],
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+    });
+  }
 }
 
 function insert(api, newEls, capture = CaptureUpdateAction.IMMEDIATELY) {
@@ -364,8 +509,14 @@ async function* ndjson(res) {
 }
 
 // ----------------------------------------------------------------- main ---
+// Text is wrapped by measuring it, so the card and ink fonts must be loaded first;
+// otherwise lines are wrapped for a narrower fallback font and overflow the card.
+const fontsReady = () =>
+  Promise.all(["14px Nunito", "17px Nunito", "20px Excalifont", "16px Excalifont"].map((f) => document.fonts.load(f))).catch(() => {});
+
 export async function askClaude(api, { scope, question, cwd }) {
   const askedAt = Date.now();
+  await fontsReady();
   const t = selectTargets(api, scope);
   if (!t.context.length) {
     api.setToast({ message: "The board is empty — draw something first.", duration: 3000 });
@@ -416,6 +567,46 @@ export async function askClaude(api, { scope, question, cwd }) {
     });
     placeholderIds = new Set(next.map((e) => e.id));
   };
+  // The diagram is redrawn under the card every time another line streams in.
+  let partialIds = new Set();
+  let diagramBusy = false;
+  let diagramNext = null;
+  const drawPartialDiagram = async (src) => {
+    if (diagramBusy) {
+      diagramNext = src;
+      return;
+    }
+    diagramBusy = true;
+    try {
+      const { elements: dEls, files } = await diagramElements(src, { quick: true });
+      if (files) api.addFiles(Object.values(files));
+      const card = api.getSceneElements().filter((e) => placeholderIds.has(e.id));
+      const cb = card.length ? boundsOf(card) : { minX: spot.x, maxY: spot.y + 200 };
+      const db = boundsOf(dEls);
+      const placed = translate(dEls, cb.minX - db.minX, cb.maxY + 48 - db.minY).map((e) => ({
+        ...e, ...inkStyle(e), customData: { claudePending: true, role: "diagram" },
+      }));
+      api.updateScene({
+        elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !partialIds.has(e.id)), ...placed],
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+      partialIds = new Set(placed.map((e) => e.id));
+    } catch {
+      // a half-written diagram may not parse yet; keep the last good one
+    } finally {
+      diagramBusy = false;
+      if (diagramNext) {
+        const n = diagramNext;
+        diagramNext = null;
+        drawPartialDiagram(n);
+      }
+    }
+  };
+  const settleDiagram = async () => {
+    diagramNext = null;
+    while (diagramBusy) await sleep(20);
+  };
+
   const update = (patch) => {
     shown = { ...shown, ...patch };
     const r = running.get(runId);
@@ -443,6 +634,10 @@ export async function askClaude(api, { scope, question, cwd }) {
       else if (ev.type === "context")
         update({ status: ev.ids.length ? `Using ${ev.ids.length} earlier answer${ev.ids.length > 1 ? "s" : ""}…` : "Answering…" });
       else if (ev.type === "delta") update({ answer: ev.answer, status: "" });
+      else if (ev.type === "diagram") {
+        if (!partialIds.size) update({ status: "Drawing the diagram…" });
+        drawPartialDiagram(ev.mermaid);
+      }
       else if (ev.type === "error") throw new Error(ev.error);
       else if (ev.type === "done") data = ev;
     }
@@ -480,6 +675,7 @@ export async function askClaude(api, { scope, question, cwd }) {
             ...e,
             groupIds: [...(e.groupIds || []), groupId],
             customData: { claude: true, ...meta, role: "diagram" },
+            ...(e === titled[0] ? {} : inkStyle(e)),
           })),
         ];
       } catch (e) {
@@ -487,7 +683,8 @@ export async function askClaude(api, { scope, question, cwd }) {
       }
     }
 
-    removeById(api, placeholderIds);
+    await settleDiagram();
+    removeById(api, new Set([...placeholderIds, ...partialIds]));
     const b = boundsOf(block);
     const at = findFreeSpot(b.maxX - b.minX, b.maxY - b.minY, anchor, live(api));
     block = translate(block, at.x - b.minX, at.y - b.minY);
@@ -513,13 +710,16 @@ export async function askClaude(api, { scope, question, cwd }) {
         groupId: rid(),
         meta: { askId: data.id, askedAt },
         seed: askedAt,
+        writeAnchor: boundsOf(block.filter((e) => e.customData?.role === "bg")),
       });
     }
-    insert(api, [...block, ...ink]);
+    insert(api, block);
     scrollIntoViewIfNeeded(api, block);
+    if (ink.length) await animateInk(api, ink);
   } catch (e) {
     clearTimeout(renderTimer);
-    removeById(api, placeholderIds);
+    await settleDiagram();
+    removeById(api, new Set([...placeholderIds, ...partialIds]));
     const aborted = controller.signal.aborted || e.message === "cancelled";
     api.setToast(
       aborted

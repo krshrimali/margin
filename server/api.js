@@ -41,6 +41,25 @@ const MAX_BODY = 60 * 1024 * 1024;
 for (const d of [BOARDS_DIR, ASKS_DIR, CLAUDE_CWD]) fs.mkdirSync(d, { recursive: true });
 
 const safeName = (n) => (String(n || "default").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default");
+// Board metadata (title, element count) lives next to the board file.
+const metaPath = (id) => path.join(BOARDS_DIR, `${id}.meta.json`);
+async function readMeta(id) {
+  try {
+    return JSON.parse(await fsp.readFile(metaPath(id), "utf8"));
+  } catch {
+    return {};
+  }
+}
+async function writeMeta(id, patch) {
+  await fsp.writeFile(metaPath(id), JSON.stringify({ ...(await readMeta(id)), ...patch }));
+}
+async function uniqueId(title) {
+  const base = String(title).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "board";
+  let id = base;
+  for (let i = 2; fs.existsSync(path.join(BOARDS_DIR, `${id}.excalidraw`)); i++) id = `${base}-${i}`;
+  return id;
+}
+
 const expandHome = (p) => (p.startsWith("~") ? path.join(process.env.HOME || "", p.slice(1)) : p);
 
 function send(res, status, body) {
@@ -283,7 +302,9 @@ Ink commands (a JSON array inside <ink></ink>):
   {"do":"arrow","from":"R2","to":"R7","label":"retry"}   draw a missing connection
   {"do":"bracket","targets":["R1","R2"],"note":"same step"}  group several regions
   {"do":"note","near":"R6","text":"add a cache here"}    a handwritten note with an arrow to R6
-Notes are short handwriting, at most 8 words, and are placed in free space automatically. Use at most 8 commands. Use ink when pointing at specific parts of the drawing explains it better than words, as in reviews, corrections, "this one" or "missing link". Then keep the card text shorter, because the ink carries the message. Plain questions with nothing to point at need no ink.`;
+  {"do":"write","text":"..."}                            a handwritten explanation (up to 40 words) written beside your card
+Notes are short handwriting, at most 8 words, and are placed in free space automatically. Give each region at most one note; several notes on the same region are merged into one list. When the user asks you to explain by hand or write things out, use "write". Use at most 8 commands.
+If the user asks you to draw a diagram or flowchart, put it in <diagram>. It is drawn by hand in your ink colour. Use ink when pointing at specific parts of the drawing explains it better than words, as in reviews, corrections, "this one" or "missing link". Then keep the card text shorter, because the ink carries the message. Plain questions with nothing to point at need no ink.`;
 
 function regionText(regions) {
   if (!regions?.length) return "";
@@ -325,7 +346,11 @@ How to respond:
 - Start with the answer itself. Don't restate the question, and don't open with "What I see".
 - Keep it short: at most about 120 words, in short bullets. The user can ask for more detail.
 - Use plain text only, with no markdown (#, **, backticks, tables or links). Use "- " bullets, "1." lists and, rarely, a short CAPITALISED label.
-- Add a diagram only when the user is designing a system, flow or process and a corrected version would help more than words. Never add one for plain Q&A. When you do, put a Mermaid flowchart, sequenceDiagram or classDiagram with at most 12 nodes and short labels inside <diagram></diagram>.
+- Add a diagram only when the user asks you to draw, or is designing a system, flow or process and a corrected version would help more than words. Never add one for plain Q&A. When you do, put a Mermaid flowchart, sequenceDiagram or classDiagram with at most 10 nodes inside <diagram></diagram>. It is laid out automatically, so keep it simple to avoid overlaps:
+  - no subgraphs (put the group in the node label instead, e.g. "GPU (graphics card)"),
+  - edge labels of 3 words or fewer; put numbers and details in node labels,
+  - one arrow per pair of nodes, using "-->" (a single "<-->" is fine for two-way),
+  - prefer "flowchart TD"; use LR only for a short left-to-right pipeline.
 - Tools: most answers need none. Only when the board refers to a specific codebase, file or project should you look it up. Your working directory (the user's project folder) is ${cwd}.
 
 Output format (exactly):
@@ -480,6 +505,7 @@ async function handleAsk(req, res) {
       let text = "";
       let lastSent = "";
       let lastAt = 0;
+      let lastDiagram = "";
       return runClaude({
         content: [...imageBlocks(focusB64, contextB64, marksB64), { type: "text", text: prompt }],
         args,
@@ -494,6 +520,17 @@ async function handleAsk(req, res) {
               lastSent = vis;
               lastAt = Date.now();
               emit({ type: "delta", answer: vis });
+            }
+            // Stream the diagram too: send it every time another full line has arrived.
+            const dm = text.match(/<diagram>([\s\S]*?)(?:<\/diagram>|$)/i);
+            if (dm) {
+              const closed = /<\/diagram>/i.test(text);
+              const body = dm[1].replace(/^\s*```(?:mermaid)?\s*/i, "");
+              const complete = (closed ? body.replace(/```\s*$/, "") : body.slice(0, body.lastIndexOf("\n") + 1)).trim();
+              if (complete && complete !== lastDiagram && complete.split("\n").length >= 2) {
+                lastDiagram = complete;
+                emit({ type: "diagram", mermaid: complete });
+              }
             }
           } else if (ev.type === "assistant") {
             for (const b of ev.message?.content || []) if (b.type === "tool_use") emit({ type: "status", text: toolStatus(b) + "…" });
@@ -586,13 +623,89 @@ export async function apiHandler(req, res, next) {
       }
       if (req.method === "PUT" || req.method === "POST") {
         const body = await readBody(req);
-        JSON.parse(body); // validate
+        const parsed = JSON.parse(body); // validate
         const tmp = `${file}.tmp`;
         await fsp.writeFile(tmp, body);
         await fsp.rename(tmp, file);
+        const id = safeName(url.searchParams.get("name"));
+        await writeMeta(id, { elements: (parsed.elements || []).filter((e) => !e.isDeleted).length });
+        return send(res, 200, { ok: true, savedAt: Date.now() });
+      }
+    }
+    // ---------------------------------------------------------------- boards
+    // A board is data/boards/<id>.excalidraw, with optional <id>.meta.json
+    // ({ title }) and <id>.png (thumbnail). Deleted boards go to data/trash/.
+    if (url.pathname === "/api/boards" && req.method === "GET") {
+      const files = (await fsp.readdir(BOARDS_DIR)).filter((f) => f.endsWith(".excalidraw"));
+      const boards = await Promise.all(
+        files.map(async (f) => {
+          const id = f.slice(0, -".excalidraw".length);
+          const st = await fsp.stat(path.join(BOARDS_DIR, f));
+          const meta = await readMeta(id);
+          return {
+            id,
+            title: meta.title || (id === "default" ? "My board" : id),
+            updated: st.mtimeMs,
+            elements: meta.elements ?? null,
+            thumb: fs.existsSync(path.join(BOARDS_DIR, `${id}.png`)) ? Math.round(fs.statSync(path.join(BOARDS_DIR, `${id}.png`)).mtimeMs) : null,
+          };
+        }),
+      );
+      boards.sort((a, b) => b.updated - a.updated);
+      return send(res, 200, { boards });
+    }
+    if (url.pathname === "/api/boards" && req.method === "POST") {
+      const { title = "Untitled board", from } = JSON.parse((await readBody(req)) || "{}");
+      const id = await uniqueId(title);
+      const src = from ? path.join(BOARDS_DIR, `${safeName(from)}.excalidraw`) : null;
+      if (src && fs.existsSync(src)) {
+        await fsp.copyFile(src, path.join(BOARDS_DIR, `${id}.excalidraw`));
+        const thumb = path.join(BOARDS_DIR, `${safeName(from)}.png`);
+        if (fs.existsSync(thumb)) await fsp.copyFile(thumb, path.join(BOARDS_DIR, `${id}.png`));
+      } else {
+        await fsp.writeFile(
+          path.join(BOARDS_DIR, `${id}.excalidraw`),
+          JSON.stringify({ type: "excalidraw", version: 2, source: "claude-whiteboard", elements: [], appState: {}, files: {} }),
+        );
+      }
+      await writeMeta(id, { title: String(title).slice(0, 120), elements: from ? (await readMeta(safeName(from))).elements ?? null : 0 });
+      return send(res, 200, { id });
+    }
+    const m = /^\/api\/boards\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
+    if (m) {
+      const id = m[1];
+      const file = path.join(BOARDS_DIR, `${id}.excalidraw`);
+      if (!fs.existsSync(file)) return send(res, 404, { error: "no such board" });
+      if (req.method === "PATCH") {
+        const { title } = JSON.parse(await readBody(req));
+        await writeMeta(id, { title: String(title || "").trim().slice(0, 120) || id });
+        return send(res, 200, { ok: true });
+      }
+      if (req.method === "DELETE") {
+        const trash = path.join(DATA_DIR, "trash", `${id}-${Date.now()}`);
+        await fsp.mkdir(trash, { recursive: true });
+        for (const ext of [".excalidraw", ".meta.json", ".png"]) {
+          const f = path.join(BOARDS_DIR, id + ext);
+          if (fs.existsSync(f)) await fsp.rename(f, path.join(trash, id + ext));
+        }
+        return send(res, 200, { ok: true, trash });
+      }
+    }
+    if (url.pathname === "/api/board/thumb") {
+      const file = path.join(BOARDS_DIR, `${safeName(url.searchParams.get("name"))}.png`);
+      if (req.method === "GET") {
+        if (!fs.existsSync(file)) return send(res, 404, { error: "no thumbnail" });
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "no-cache" });
+        return fs.createReadStream(file).pipe(res);
+      }
+      if (req.method === "PUT") {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        await fsp.writeFile(file, Buffer.concat(chunks));
         return send(res, 200, { ok: true });
       }
     }
+
     if (url.pathname === "/api/ask" && req.method === "POST") return await handleAsk(req, res);
     send(res, 404, { error: "unknown endpoint" });
   } catch (e) {

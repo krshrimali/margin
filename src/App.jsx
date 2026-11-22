@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Excalidraw, MainMenu, getSceneVersion, serializeAsJSON } from "@excalidraw/excalidraw";
+import { Excalidraw, MainMenu, exportToBlob, getSceneVersion, serializeAsJSON } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import PenInput from "./PenInput.jsx";
 import PenDock from "./PenDock.jsx";
 import { PRESETS, loadPenSettings, savePenSettings } from "./pens.js";
 import { clearInk, inkState, setInkHidden } from "./ink.js";
+import Boards from "./Boards.jsx";
 import { SCOPES, SCOPE_HINTS, askClaude, cancelAsk, onRunningChange } from "./claude.js";
 
-const BOARD = new URLSearchParams(location.search).get("board") || "default";
 const LS = {
   get: (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
 };
+// The open board: ?board=<id>, else the last one you had open, else "default".
+const BOARD = new URLSearchParams(location.search).get("board") || LS.get("whiteboard.lastBoard", "default");
+LS.set("whiteboard.lastBoard", BOARD);
+if (new URLSearchParams(location.search).get("board") !== BOARD) {
+  const u = new URL(location.href);
+  u.searchParams.set("board", BOARD);
+  history.replaceState(null, "", u);
+}
 
 const loadBoard = async () => {
   try {
@@ -181,7 +189,9 @@ export default function App() {
   const [penActive, setPenActive] = useState(false);
   const [stylusOnly, setStylusOnly] = useState(() => LS.get("whiteboard.stylusOnly", false));
   const [theme, setTheme] = useState("light");
-  const saveRef = useRef({ version: -1, timer: 0 });
+  const saveRef = useRef({ version: -1, timer: 0, thumbAt: 0 });
+  const [saveStatus, setSaveStatus] = useState("saved");
+  const [boardsSignal, setBoardsSignal] = useState(0);
 
   const pickPen = useCallback(
     (id) => {
@@ -214,12 +224,67 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [pickPen]);
 
-  const save = useCallback(() => {
+  const save = useCallback(async () => {
     if (!api) return;
     const elements = api.getSceneElements().filter((e) => !e.customData?.claudePending);
     const body = serializeAsJSON(elements, api.getAppState(), api.getFiles(), "local");
-    return fetch(`/api/board?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body, keepalive: body.length < 60000 }).catch(() => {});
+    setSaveStatus("saving");
+    try {
+      const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body, keepalive: body.length < 60000 });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      setSaveStatus(saveRef.current.timer ? "unsaved" : "saved");
+    } catch {
+      setSaveStatus("error");
+      return;
+    }
+    // refresh the board's thumbnail at most every 8 seconds
+    if (elements.length && Date.now() - saveRef.current.thumbAt > 8000) {
+      saveRef.current.thumbAt = Date.now();
+      exportToBlob({
+        elements,
+        files: api.getFiles(),
+        appState: { ...api.getAppState(), exportBackground: true, viewBackgroundColor: "#ffffff", exportWithDarkMode: false },
+        mimeType: "image/png",
+        exportPadding: 24,
+        getDimensions: (w, h) => {
+          const scale = Math.min(1, 480 / Math.max(w, h));
+          return { width: w * scale, height: h * scale, scale };
+        },
+      })
+        .then((blob) => fetch(`/api/board/thumb?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body: blob }))
+        .catch(() => {});
+    }
   }, [api]);
+
+  // Ctrl+S saves the board now (files: ☰ menu → Save to…)
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        e.stopPropagation();
+        clearTimeout(saveRef.current.timer);
+        saveRef.current.timer = 0;
+        save()?.then(() => api?.setToast({ message: "Board saved", duration: 1500 }));
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [save, api]);
+
+  const openBoard = useCallback(
+    async (id) => {
+      if (saveRef.current.timer) {
+        clearTimeout(saveRef.current.timer);
+        saveRef.current.timer = 0;
+        await save();
+      }
+      LS.set("whiteboard.lastBoard", id);
+      const u = new URL(location.href);
+      u.searchParams.set("board", id);
+      location.href = u.toString();
+    },
+    [save],
+  );
 
   useEffect(() => {
     const flush = () => { if (saveRef.current.timer) { clearTimeout(saveRef.current.timer); save(); } };
@@ -237,6 +302,7 @@ export default function App() {
       saveRef.current.version = v;
       if (first) return;
       clearTimeout(saveRef.current.timer);
+      setSaveStatus("unsaved");
       saveRef.current.timer = setTimeout(() => { saveRef.current.timer = 0; save(); }, 800);
     }
   };
@@ -252,6 +318,8 @@ export default function App() {
         renderTopRightUI={() => <ClaudeControls api={api} />}
       >
         <MainMenu>
+          <MainMenu.Item onSelect={() => setBoardsSignal((n) => n + 1)} shortcut="">Boards…</MainMenu.Item>
+          <MainMenu.Separator />
           <MainMenu.DefaultItems.LoadScene />
           <MainMenu.DefaultItems.SaveToActiveFile />
           <MainMenu.DefaultItems.Export />
@@ -265,6 +333,7 @@ export default function App() {
           <MainMenu.DefaultItems.Help />
         </MainMenu>
       </Excalidraw>
+      <Boards board={BOARD} status={saveStatus} onOpen={openBoard} openSignal={boardsSignal} />
       <PenDock
         settings={penSettings}
         penId={penId}
