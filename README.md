@@ -53,6 +53,9 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   draws the strokes with the same pen engine you use. Notes go in free space; marks sit on your content but on
   their own layer. **Alt+I** hides or shows the layer, and the ▾ menu can also clear it. Ink is undoable like
   anything else.
+- **Diagram skill.** Claude is started with `--plugin-dir agent-plugin`, which gives it the `board-diagrams` skill
+  (`agent-plugin/skills/board-diagrams/SKILL.md`). It loads the skill before drawing: which Mermaid shapes, arrows and
+  styles survive the conversion onto the board, layout rules that avoid overlaps, and templates. Codex doesn't load it.
 - **Project folder** (in the ▾ menu, saved per board): the folder Claude works in when your board refers to code.
 - Claude runs as `claude -p --dangerously-skip-permissions` (headless, all tools allowed).
 

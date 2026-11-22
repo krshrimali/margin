@@ -386,6 +386,17 @@ function overlapScore(els) {
   return score;
 }
 
+/**
+ * Diagram text uses Excalidraw's default hand-drawn font. Set it on the skeletons (before
+ * conversion, so text is measured in it) rather than relying on the default staying the same.
+ */
+const withExcalifont = (skeletons) =>
+  skeletons.map((s) => {
+    if (s.type === "text") return { ...s, fontFamily: FONT_FAMILY.Excalifont };
+    if (s.label) return { ...s, label: { ...s.label, fontFamily: FONT_FAMILY.Excalifont } };
+    return s;
+  });
+
 async function diagramElements(mermaid, { quick = false } = {}) {
   const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
   const src = mermaid.trim();
@@ -395,7 +406,7 @@ async function diagramElements(mermaid, { quick = false } = {}) {
   for (const v of [...new Set(variants)]) {
     try {
       const { elements, files } = await parseMermaidToExcalidraw(v, { themeVariables: { fontSize: "16px" } });
-      const els = convertToExcalidrawElements(elements, { regenerateIds: true });
+      const els = convertToExcalidrawElements(withExcalifont(elements), { regenerateIds: true });
       const score = overlapScore(els);
       if (!best || score < best.score) best = { elements: els, files, score, variant: v };
       if (score === 0) break;

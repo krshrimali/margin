@@ -22,6 +22,8 @@ const BOARDS_DIR = path.join(DATA_DIR, "boards");
 const ASKS_DIR = path.join(DATA_DIR, "asks");
 // Default directory Claude runs in. The UI can override it per board ("Project folder").
 const CLAUDE_CWD = path.resolve(process.env.CLAUDE_CWD || path.join(DATA_DIR, "workspace"));
+// Plugin with the skills the answering agent can load (e.g. board-diagrams).
+const AGENT_PLUGIN_DIR = path.join(ROOT, "agent-plugin");
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "";
 const SELECT_MODEL = process.env.CLAUDE_SELECT_MODEL || "haiku";
@@ -346,7 +348,7 @@ How to respond:
 - Start with the answer itself. Don't restate the question, and don't open with "What I see".
 - Keep it short: at most about 120 words, in short bullets. The user can ask for more detail.
 - Use plain text only, with no markdown (#, **, backticks, tables or links). Use "- " bullets, "1." lists and, rarely, a short CAPITALISED label.
-- Add a diagram only when the user asks you to draw, or is designing a system, flow or process and a corrected version would help more than words. Never add one for plain Q&A. When you do, put a Mermaid flowchart, sequenceDiagram or classDiagram with at most 10 nodes inside <diagram></diagram>. It is laid out automatically, so keep it simple to avoid overlaps:
+- Add a diagram only when the user asks you to draw, or is designing a system, flow or process and a corrected version would help more than words. Never add one for plain Q&A. When you do, put a Mermaid flowchart, sequenceDiagram, stateDiagram-v2, classDiagram or erDiagram with at most 10 nodes inside <diagram></diagram>.${engine === "claude" ? " Before writing it, load the board-diagrams skill: it lists the shapes, arrows and styles that survive conversion onto the board, and templates." : ""} It is laid out automatically, so keep it simple to avoid overlaps:
   - no subgraphs (put the group in the node label instead, e.g. "GPU (graphics card)"),
   - edge labels of 3 words or fewer; put numbers and details in node labels,
   - one arrow per pair of nodes, using "-->" (a single "<-->" is fine for two-way),
@@ -413,6 +415,7 @@ function toolStatus(block) {
     case "Bash": return `Running ${short(i.command)}`;
     case "WebSearch": return `Searching the web: ${short(i.query)}`;
     case "WebFetch": return `Reading ${short(i.url)}`;
+    case "Skill": return /diagram/i.test(i.skill || "") ? "Reading the diagram guide" : `Loading ${short(i.skill)}`;
     default: return `Using ${block.name}`;
   }
 }
@@ -498,7 +501,7 @@ async function handleAsk(req, res) {
     const answer = async (resume) => {
       const prompt = buildPrompt({ hasFocus: !!focusB64, summary, question, scope, earlier, cwd, resumed: resume, regions: marksB64 ? regions : [] });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
-      const args = ["--add-dir", dir];
+      const args = ["--add-dir", dir, "--plugin-dir", AGENT_PLUGIN_DIR];
       if (CLAUDE_MODEL) args.push("--model", CLAUDE_MODEL);
       if (resume) args.push("--resume", parent.sessionId, "--fork-session");
       args.push("--include-partial-messages");
