@@ -49,10 +49,16 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
 - **Claude's ink.** Claude can also mark up your drawing with a pen in its own violet, like a teacher marking a page:
   circles, underlines, ✓ and ✗, strike-throughs, brackets, missing arrows (looped around the side) and short
   handwritten notes. To make this precise, the server sends Claude a third snapshot where your content is grouped
-  into labelled regions (R1, R2… for your content, C1… for its cards). Claude refers to those labels, and the app
+  into labelled regions (R1, R2… for your content, D1, D2… for the shapes of its diagrams, C1… for its cards). Claude refers to those labels, and the app
   draws the strokes with the same pen engine you use. Notes go in free space; marks sit on your content but on
   their own layer. **Alt+I** hides or shows the layer, and the ▾ menu can also clear it. Ink is undoable like
   anything else.
+- **Edits.** When you ask for existing content to change ("make it colourful", "rename X to Y", "fix the typo",
+  "update your diagram", "remove that box"), Claude edits the regions in place instead of telling you how: it
+  recolours fills, strokes, ink and text, retypes typed text and labels (boxes grow to fit), or removes regions.
+  This works on your content and on its own diagrams, but not on its answer cards or on handwriting (handwriting can
+  be recoloured but not retyped). A review or a question never changes your content silently. All edits from one
+  answer are a single undo step (Ctrl+Z).
 - **Diagram skill.** Claude is started with `--plugin-dir agent-plugin`, which gives it the `board-diagrams` skill
   (`agent-plugin/skills/board-diagrams/SKILL.md`). It loads the skill before drawing: which Mermaid shapes, arrows and
   styles survive the conversion onto the board, layout rules that avoid overlaps, and templates. Codex doesn't load it.

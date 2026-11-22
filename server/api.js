@@ -219,7 +219,7 @@ function imageBlocks(focusB64, contextB64, marksB64) {
   const blocks = [];
   if (focusB64) blocks.push({ type: "text", text: "FOCUS image:" }, imageBlock(focusB64));
   blocks.push({ type: "text", text: focusB64 ? "CONTEXT image (surroundings):" : "BOARD image:" }, imageBlock(contextB64));
-  if (marksB64) blocks.push({ type: "text", text: "MARKS image (same as above, with labelled regions R1, R2… and your cards C1, C2…):" }, imageBlock(marksB64));
+  if (marksB64) blocks.push({ type: "text", text: "MARKS image (same as above, with labelled regions R1, R2…, your diagram shapes D1, D2… and your cards C1, C2…):" }, imageBlock(marksB64));
   return blocks;
 }
 
@@ -308,11 +308,22 @@ Ink commands (a JSON array inside <ink></ink>):
 Notes are short handwriting, at most 8 words, and are placed in free space automatically. Give each region at most one note; several notes on the same region are merged into one list. When the user asks you to explain by hand or write things out, use "write". Use at most 8 commands.
 If the user asks you to draw a diagram or flowchart, put it in <diagram>. It is drawn by hand in your ink colour. Use ink when pointing at specific parts of the drawing explains it better than words, as in reviews, corrections, "this one" or "missing link". Then keep the card text shorter, because the ink carries the message. Plain questions with nothing to point at need no ink.`;
 
+const EDIT_HELP = `You can also EDIT what is already on the board: the user's content (R…) and your own diagrams (D…), not answer cards (C…).
+Edit commands (a JSON array inside <edit></edit>):
+  {"do":"style","targets":["R1","D2"],"fill":"#ffc9c9","stroke":"#e03131"}   recolour shapes (fill only affects boxes, ellipses, diamonds)
+  {"do":"style","target":"R6","textColor":"#1971c2"}                         colour typed text or a box's label
+  {"do":"style","target":"R4","stroke":"#2f9e44","strokeWidth":2,"strokeStyle":"dashed","fillStyle":"solid"}
+  {"do":"relabel","target":"D3","text":"new label"}                          replace the typed text of a region
+  {"do":"relabel","target":"R2","from":"old words","text":"new words"}      replace part of it
+  {"do":"delete","target":"R9"}                                              remove a region (only when the user asks to remove it)
+Colours that suit the board: stroke #1e1e1e #e03131 #2f9e44 #1971c2 #f08c00 #9c36b5 #0c8599; fill #ffc9c9 #b2f2bb #a5d8ff #ffec99 #eebefa #ffd8a8 #99e9f2 #e9ecef. For handwriting and pen strokes, "stroke" recolours the ink; handwriting can't be relabelled (strike it and add a note instead).
+Decide from the request whether to edit. When the user asks to change existing content, for example "make it colourful", "colour the errors red", "rename X to Y", "fix the typo", "correct my diagram", "update your diagram" or "remove that box", do it with <edit> instead of describing how they could do it themselves, and keep the card to a line or two saying what you changed. When they ask for a review, an explanation or feedback, don't silently change their content: mark it with ink and suggest the fix. To restructure one of your own diagrams beyond recolouring or renaming, draw a new <diagram> instead. Group regions that get the same change into one command with "targets". At most 60 commands.`;
+
 function regionText(regions) {
   if (!regions?.length) return "";
   return regions
-    .slice(0, 140)
-    .map((r) => `${r.id}: ${r.kind}${r.label ? ` "${r.label}"` : ""}${r.focus ? " [NEW]" : ""}`)
+    .slice(0, 220)
+    .map((r) => `${r.id}: ${r.kind}${r.label ? ` "${r.label}"` : ""}${r.style ? ` (${r.style})` : ""}${r.focus ? " [NEW]" : ""}`)
     .join("\n");
 }
 
@@ -328,7 +339,7 @@ function buildPrompt({ hasFocus, summary, question, scope, earlier, cwd, resumed
   return `${resumed ? "The user has added something new to the board in reply to your answer above.\n\n" : ""}You live inside a hand-drawn whiteboard app. The user writes and draws on the board, mostly by hand, and asks you to respond. Your reply goes on the board as a card next to their content.
 
 ${engine === "codex" ? `The attached images, in order: ${hasFocus ? "FOCUS, CONTEXT" : "BOARD"}${regions?.length ? ", MARKS" : ""}.` : "The images attached above:"}
-${images}${regions?.length ? "\n- MARKS image: the same board with labelled regions R1, R2… and your cards C1, C2…" : ""}
+${images}${regions?.length ? "\n- MARKS image: the same board with labelled regions R1, R2…, your diagram shapes D1, D2… and your cards C1, C2…" : ""}
 Violet cards labelled "✦ Claude" are your earlier answers.
 
 Your earlier answers that are relevant here (picked from everything on the board). Do NOT repeat them:
@@ -336,7 +347,7 @@ ${earlierText}
 
 Typed text, shapes and arrows extracted from the board (handwriting is not included; [NEW] = added since your last answer):
 ${summary || "(none)"}
-${regions?.length ? `\nLabelled regions in the MARKS image:\n${regionText(regions)}\n\n${INK_HELP}\n` : ""}
+${regions?.length ? `\nLabelled regions in the MARKS image (R = the user's content, D = shapes of your diagrams, C = your answer cards; current colours in brackets):\n${regionText(regions)}\n\n${INK_HELP}\n\n${EDIT_HELP}\n` : ""}
 ${question?.trim() ? `\nThe user also typed: "${question.trim()}"\n` : ""}
 How to respond:
 - Work out the intent from the content itself:
@@ -364,7 +375,10 @@ Output format (exactly):
 </diagram>${regions?.length ? `
 <ink>
 [...optional ink commands, omit the whole tag if none...]
-</ink>` : ""}`;
+</ink>
+<edit>
+[...optional edit commands, omit the whole tag if none...]
+</edit>` : ""}`;
 }
 
 function stripMarkdown(s) {
@@ -388,21 +402,22 @@ function visibleAnswer(text) {
 
 function parseAnswer(text) {
   let answer = visibleAnswer(text);
-  if (!answer) answer = stripMarkdown(text.replace(/<diagram>[\s\S]*?<\/diagram>/i, "").trim());
+  if (!answer) answer = stripMarkdown(text.replace(/<(diagram|ink|edit)>[\s\S]*?<\/\1>/gi, "").trim());
   const m = text.match(/<diagram>([\s\S]*?)<\/diagram>/i);
   let diagram = m ? m[1].replace(/^\s*```(?:mermaid)?\s*/i, "").replace(/```\s*$/, "").trim() : null;
-  let ink = [];
-  const im = text.match(/<ink>([\s\S]*?)<\/ink>/i);
-  if (im) {
+  const commands = (tag, max) => {
+    const m = text.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i"));
+    if (!m) return [];
     try {
-      const raw = im[1].replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+      const raw = m[1].replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
       const parsed = JSON.parse(raw || "[]");
-      ink = (Array.isArray(parsed) ? parsed : parsed.commands || []).filter((c) => c && typeof c === "object").slice(0, 12);
+      return (Array.isArray(parsed) ? parsed : parsed.commands || []).filter((c) => c && typeof c === "object").slice(0, max);
     } catch (e) {
-      console.warn("could not parse <ink>:", e.message);
+      console.warn(`could not parse <${tag}>:`, e.message);
+      return [];
     }
-  }
-  return { answer, diagram: diagram || null, ink };
+  };
+  return { answer, diagram: diagram || null, ink: commands("ink", 12), edits: commands("edit", 80) };
 }
 
 function toolStatus(block) {

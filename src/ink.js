@@ -1,13 +1,15 @@
 // Claude's ink: annotations drawn with the pen engine on top of the user's board.
 //
-// 1. regionsFor() groups the user's elements into labelled regions (R1, R2…)
-//    and Claude's cards into C1, C2…; markElements() draws those labels on a
+// 1. regionsFor() groups the user's elements into labelled regions (R1, R2…),
+//    Claude's diagram shapes into D1, D2… and Claude's cards into C1, C2…; markElements() draws those labels on a
 //    copy of the snapshot so Claude can refer to things precisely.
 // 2. Claude answers with commands such as {"do":"circle","target":"R3"}.
 // 3. renderInk() turns the commands into hand-drawn freedraw strokes and
 //    handwritten notes. Notes go in free space; marks sit on the content but
 //    live on their own layer that can be hidden or cleared.
-import { convertToExcalidrawElements, getCommonBounds, FONT_FAMILY, CaptureUpdateAction } from "@excalidraw/excalidraw";
+// 4. applyEdits() changes existing regions in place (colours, text, removal)
+//    when the user asks for their content to be changed rather than marked up.
+import { convertToExcalidrawElements, getCommonBounds, FONT_FAMILY, CaptureUpdateAction, newElementWith } from "@excalidraw/excalidraw";
 import { makeFreedraw, penDescriptor, PRESETS } from "./pens.js";
 
 export const INK_COLOR = "#7048e8";
@@ -43,17 +45,21 @@ function isConnector(el, b) {
 
 const isCardBg = (e) => e.customData?.claude && (e.customData.role === "bg" || (!e.customData.role && e.type === "rectangle" && e.backgroundColor === "#f3f0ff"));
 
-/**
- * Group the user's elements into regions and Claude's answer cards into
- * card regions. Returns [{ id, kind, ids, bounds, label }].
- */
-export function regionsFor(context) {
-  const items = context
-    .filter((e) => !e.customData?.claude && !e.customData?.claudePending && !(e.type === "text" && e.containerId))
-    .map((el) => ({ el, b: boundsOf([el]) }));
-  // also attach bound text to its container
-  const boundText = new Map(context.filter((e) => e.type === "text" && e.containerId).map((t) => [t.containerId, t]));
+const isDiagramEl = (e) => e.customData?.claude && e.customData.role === "diagram" && !(e.type === "text" && e.text === "Suggested diagram");
+const FILLABLE = new Set(["rectangle", "ellipse", "diamond"]);
 
+/** Current colours of a region's elements, e.g. 'stroke #1e1e1e, fill #b2f2bb, text #1e1e1e'. */
+function styleOf(els) {
+  const uniq = (xs) => [...new Set(xs)].slice(0, 2).join("/");
+  const stroke = uniq(els.filter((e) => e.type !== "text").map((e) => e.strokeColor));
+  const fill = uniq(els.filter((e) => FILLABLE.has(e.type)).map((e) => e.backgroundColor));
+  const text = uniq(els.filter((e) => e.type === "text").map((e) => e.strokeColor));
+  return [stroke && `stroke ${stroke}`, fill && `fill ${fill}`, text && `text ${text}`].filter(Boolean).join(", ");
+}
+
+/** Group elements that belong together (a box and its text, a handwritten word) into regions. */
+function groupRegions(els, boundText) {
+  const items = els.map((el) => ({ el, b: boundsOf([el]) }));
   const parent = items.map((_, i) => i);
   const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
   const join = (i, j) => (parent[find(i)] = find(j));
@@ -81,24 +87,49 @@ export function regionsFor(context) {
   items.forEach((it, i) => {
     const r = find(i);
     if (!groups.has(r)) groups.set(r, []);
-    groups.get(r).push(it);
+    groups.get(r).push({ ...it, conn: conn[i] });
   });
-  let regions = [...groups.values()].map((g) => {
-    const ids = g.flatMap(({ el }) => (boundText.has(el.id) ? [el.id, boundText.get(el.id).id] : [el.id]));
-    const texts = g.flatMap(({ el }) => (el.type === "text" ? [el.text] : boundText.has(el.id) ? [boundText.get(el.id).text] : []));
+  const regions = [...groups.values()].map((g) => {
+    const members = g.flatMap(({ el }) => (boundText.has(el.id) ? [el, boundText.get(el.id)] : [el]));
+    const texts = members.filter((e) => e.type === "text").map((e) => e.text);
     const types = new Set(g.map(({ el }) => el.type));
-    const hasConn = g.some((x) => conn[items.indexOf(x)]);
+    const hasConn = g.some((x) => x.conn);
     const kind = types.size === 1 && types.has("freedraw") ? (hasConn ? "pen line/arrow" : "handwriting/sketch") : types.size === 1 && types.has("text") ? "typed text" : texts.length ? "box/shape with text" : [...types].join("+");
     return {
       kind,
-      ids,
+      ids: members.map((e) => e.id),
       bounds: g.map((x) => x.b).reduce(union),
       label: texts.join(" ").replace(/\s+/g, " ").slice(0, 80),
+      style: styleOf(members),
     };
   });
   // reading order: rows (by top edge, banded), then left to right
   regions.sort((a, b) => Math.round(a.bounds.minY / 80) - Math.round(b.bounds.minY / 80) || a.bounds.minX - b.bounds.minX);
-  regions = regions.slice(0, 120).map((r, i) => ({ ...r, id: `R${i + 1}` }));
+  return regions;
+}
+
+/**
+ * Group the user's elements into regions (R1…), the shapes of Claude's
+ * suggested diagrams into diagram regions (D1…) and Claude's answer cards
+ * into card regions (C1…). Returns [{ id, kind, ids, bounds, label, style }].
+ */
+export function regionsFor(context) {
+  // bound text is attached to its container
+  const boundText = new Map(context.filter((e) => e.type === "text" && e.containerId).map((t) => [t.containerId, t]));
+  const free = (e) => !(e.type === "text" && e.containerId);
+  const user = context.filter((e) => !e.customData?.claude && !e.customData?.claudePending && free(e));
+  const regions = groupRegions(user, boundText).slice(0, 120).map((r, i) => ({ ...r, id: `R${i + 1}` }));
+
+  // one diagram at a time, so shapes of neighbouring diagrams never merge
+  const byAsk = new Map();
+  for (const e of context.filter((e) => isDiagramEl(e) && free(e))) {
+    const k = e.customData.askId || "?";
+    byAsk.set(k, [...(byAsk.get(k) || []), e]);
+  }
+  const diagram = [...byAsk.values()]
+    .flatMap((els) => groupRegions(els, boundText))
+    .slice(0, 80)
+    .map((r, i) => ({ ...r, id: `D${i + 1}`, kind: `your diagram: ${r.kind}` }));
 
   const cards = context.filter(isCardBg).map((e, i) => ({
     id: `C${i + 1}`,
@@ -107,7 +138,7 @@ export function regionsFor(context) {
     bounds: boundsOf([e]),
     label: "",
   }));
-  return [...regions, ...cards];
+  return [...regions, ...diagram, ...cards];
 }
 
 /** Labelled boxes drawn over a copy of the snapshot (never added to the board). */
@@ -373,6 +404,132 @@ function wrap(text, width) {
       return lines.join("\n");
     })
     .join("\n");
+}
+
+// ------------------------------------------------------------ edits -----
+const COLOR_RE = /^(#[0-9a-f]{3}|#[0-9a-f]{6}|#[0-9a-f]{8}|transparent)$/i;
+const colorOf = (c) => (typeof c === "string" && COLOR_RE.test(c.trim()) ? c.trim().toLowerCase() : null);
+const FILL_STYLES = new Set(["solid", "hachure", "cross-hatch", "zigzag"]);
+const STROKE_STYLES = new Set(["solid", "dashed", "dotted"]);
+
+/** Fresh size of a free-standing (or arrow-label) text with new content, keeping its anchor. */
+function retextFree(t, text) {
+  const [m] = convertToExcalidrawElements([
+    { type: "text", x: 0, y: 0, text, fontSize: t.fontSize, fontFamily: t.fontFamily, lineHeight: t.lineHeight, textAlign: t.textAlign },
+  ]);
+  const centred = t.containerId || t.textAlign === "center";
+  const x = centred ? t.x + (t.width - m.width) / 2 : t.textAlign === "right" ? t.x + t.width - m.width : t.x;
+  const y = t.containerId ? t.y + (t.height - m.height) / 2 : t.y;
+  return { text: m.text, originalText: text, width: m.width, height: m.height, x, y };
+}
+
+/** New text inside a shape: rebuild shape + label so the text wraps and the shape grows to fit (around its centre). */
+function retextInContainer(container, t, text) {
+  const [c2, t2] = convertToExcalidrawElements([
+    {
+      type: container.type, x: 0, y: 0, width: container.width, height: container.height,
+      label: { text, fontSize: t.fontSize, fontFamily: t.fontFamily, textAlign: t.textAlign, verticalAlign: t.verticalAlign, strokeColor: t.strokeColor },
+    },
+  ]);
+  const x0 = container.x - (c2.width - container.width) / 2;
+  const y0 = container.y - (c2.height - container.height) / 2;
+  return {
+    container: c2.width !== container.width || c2.height !== container.height ? { x: x0, y: y0, width: c2.width, height: c2.height } : null,
+    text: { text: t2.text, originalText: text, width: t2.width, height: t2.height, x: x0 + t2.x - c2.x, y: y0 + t2.y - c2.y },
+  };
+}
+
+/**
+ * Change existing content in place.
+ *   {"do":"style","targets":["R1","D2"],"fill":"#ffc9c9","stroke":"#e03131","textColor":"#1e1e1e","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed"}
+ *   {"do":"relabel","target":"R6","text":"new text"}             (whole text; or "from":"old phrase" to replace a part)
+ *   {"do":"delete","target":"R9"}
+ * Returns { changed: Map(id -> new element), done: n, skipped: [reasons] }.
+ */
+export function applyEdits({ commands, regions, elementsById }) {
+  const changed = new Map();
+  const cur = (id) => changed.get(id) || elementsById.get(id);
+  const set = (el, patch) => changed.set(el.id, newElementWith(el, patch));
+  const skipped = [];
+  let done = 0;
+  const regionOf = (id) => {
+    const r = regions.find((r) => r.id === String(id || "").trim().toUpperCase());
+    return r && !r.id.startsWith("C") ? r : null; // answer cards are not editable
+  };
+
+  for (const c of (commands || []).slice(0, 80)) {
+    const act = String(c.do || c.action || "").toLowerCase();
+    const targets = (Array.isArray(c.targets) ? c.targets : [c.target]).filter(Boolean);
+    const rs = targets.map(regionOf).filter(Boolean);
+    if (!rs.length) {
+      skipped.push(`${act} ${targets.join(",")}: no such region`);
+      continue;
+    }
+    try {
+      for (const r of rs) {
+        const members = r.ids.map(cur).filter((e) => e && !e.isDeleted);
+        if (!members.length) continue;
+        if (act === "style" || act === "color" || act === "colour" || act === "recolor" || act === "recolour") {
+          const stroke = colorOf(c.stroke || c.color || c.colour);
+          const fill = colorOf(c.fill || c.background);
+          const textColor = colorOf(c.textColor || c.text_color) || (members.every((e) => e.type === "text") ? stroke : null);
+          const fillStyle = FILL_STYLES.has(c.fillStyle) ? c.fillStyle : null;
+          const strokeStyle = STROKE_STYLES.has(c.strokeStyle) ? c.strokeStyle : null;
+          const strokeWidth = Number(c.strokeWidth) > 0 ? Math.max(0.5, Math.min(8, Number(c.strokeWidth))) : null;
+          for (const el of members) {
+            const patch = {};
+            if (el.type === "text") {
+              if (textColor) patch.strokeColor = textColor;
+            } else {
+              if (stroke) patch.strokeColor = stroke;
+              if (FILLABLE.has(el.type)) {
+                if (fill) patch.backgroundColor = fill;
+                if (fillStyle) patch.fillStyle = fillStyle;
+              }
+              if (el.type !== "freedraw") {
+                if (strokeStyle) patch.strokeStyle = strokeStyle;
+                if (strokeWidth) patch.strokeWidth = strokeWidth;
+              }
+            }
+            if (Object.keys(patch).length) set(el, patch);
+          }
+          done++;
+        } else if (act === "relabel" || act === "retext" || act === "rename" || act === "replace") {
+          const text = String(c.text ?? c.to ?? "").trim();
+          if (!text) throw new Error("no text");
+          const texts = members.filter((e) => e.type === "text");
+          if (!texts.length) throw new Error("no typed text here (handwriting can't be retyped)");
+          let edits;
+          if (c.from) {
+            edits = texts.filter((t) => (t.originalText || t.text).includes(c.from)).map((t) => [t, (t.originalText || t.text).split(c.from).join(text)]);
+            if (!edits.length) throw new Error(`"${c.from}" not found`);
+          } else {
+            const pick = texts.length === 1 ? texts[0] : texts.find((t) => t.containerId && !members.some((e) => e.type === "arrow" && e.id === t.containerId));
+            if (!pick) throw new Error("several texts here; give \"from\"");
+            edits = [[pick, text]];
+          }
+          for (const [t, next] of edits) {
+            const container = t.containerId ? cur(t.containerId) : null;
+            if (container && container.type !== "arrow") {
+              const u = retextInContainer(container, t, next);
+              set(t, u.text);
+              if (u.container) set(container, u.container);
+            } else set(t, retextFree(t, next));
+          }
+          done++;
+        } else if (act === "delete" || act === "remove") {
+          for (const el of members) set(el, { isDeleted: true });
+          done++;
+        } else {
+          skipped.push(`unknown edit "${act}"`);
+          break;
+        }
+      }
+    } catch (e) {
+      skipped.push(`${act} ${targets.join(",")}: ${e.message}`);
+    }
+  }
+  return { changed, done, skipped };
 }
 
 // ------------------------------------------------------------ layer -----

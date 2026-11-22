@@ -8,7 +8,7 @@ import {
   FONT_FAMILY,
   ROUNDNESS,
 } from "@excalidraw/excalidraw";
-import { regionsFor, markElements, renderInk, INK_COLOR } from "./ink.js";
+import { regionsFor, markElements, renderInk, applyEdits, INK_COLOR } from "./ink.js";
 
 export const SCOPES = {
   auto: "Auto",
@@ -542,10 +542,10 @@ export async function askClaude(api, { scope, question, cwd }) {
   ]);
   const summary = summarize(t.context, new Set(t.focus.map((e) => e.id)));
   const prior = priorAnswers(live(api), anchor);
-  // Labelled regions (R1…, C1…) so Claude can point at things with its ink.
+  // Labelled regions (R1…, D1…, C1…) so Claude can point at things with its ink and edit them.
   const regions = regionsFor(t.context);
   const marksImage = regions.length ? await snapshot(api, [...t.context, ...markElements(regions)], 2200) : null;
-  const regionList = regions.map((r) => ({ id: r.id, kind: r.kind, label: r.label, focus: hasFocus && r.ids.some((i) => t.focus.some((f) => f.id === i)) }));
+  const regionList = regions.map((r) => ({ id: r.id, kind: r.kind, label: r.label, style: r.style, focus: hasFocus && r.ids.some((i) => t.focus.some((f) => f.id === i)) }));
   const header = headerText(t.scope, question);
 
   const runId = rid();
@@ -726,6 +726,26 @@ export async function askClaude(api, { scope, question, cwd }) {
     }
     insert(api, block);
     scrollIntoViewIfNeeded(api, block);
+
+    // Edits to existing content (recolour, retype, remove), applied as one undoable step.
+    if (Array.isArray(data.edits) && data.edits.length) {
+      const { changed, done, skipped } = applyEdits({
+        commands: data.edits,
+        regions,
+        elementsById: new Map(live(api).map((e) => [e.id, e])),
+      });
+      if (skipped.length) console.warn("some edits were skipped:", skipped);
+      if (changed.size) {
+        api.updateScene({
+          elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e),
+          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+        });
+        api.setToast({
+          message: `Claude edited ${done} part${done === 1 ? "" : "s"} of the board${skipped.length ? ` (${skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`,
+          duration: 5000,
+        });
+      }
+    }
     if (ink.length) await animateInk(api, ink);
   } catch (e) {
     clearTimeout(renderTimer);
