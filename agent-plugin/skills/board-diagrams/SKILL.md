@@ -1,228 +1,222 @@
 ---
 name: board-diagrams
-description: How to draw flowcharts and other diagrams on the Margin whiteboard, so they convert cleanly into hand-drawn Excalidraw shapes under your answer card. Use whenever you are about to write a <diagram> block — a flowchart, a corrected version of the user's flow or system, a sequence of messages, a state machine, a class or data model — or when the user asks you to "draw", "sketch", "diagram" or "show the flow".
+description: How to draw on the Margin whiteboard — flowcharts (Mermaid <diagram>) and freeform visual explanations (<draw> with shapes, braces, tables, colours) — so they come out clear, well laid out and good-looking. Use whenever you are about to write a <diagram> or <draw> block, or when the user asks you to "draw", "sketch", "diagram", "visualise", "explain with a picture", "show the flow" or to research something and draw it.
 ---
 
-# Drawing diagrams on the board
+# Drawing on the board
 
-Your `<diagram>` block is Mermaid source. The app converts it into native Excalidraw elements (via
-`@excalidraw/mermaid-to-excalidraw`, laid out by Pele), redraws it in your violet ink with a hand-drawn stroke,
-and places it under your answer card with the title "Suggested diagram". The user can then move, edit and
-extend every box and arrow. Everything below is what that pipeline actually does, so follow it closely.
+You have two ways to draw. Both become native, editable Excalidraw shapes placed under your answer card (or next
+to the commented element when you reply in a comment thread), and both stream: the user watches the picture build
+item by item, so write in reading order.
+
+| Use | Block | Best for |
+|---|---|---|
+| Mermaid, laid out for you | `<diagram>` | Processes with decisions, request paths, sequences of messages, state machines, data models |
+| Shapes you place on a grid | `<draw>` | Explainers, architectures with different kinds of things (people, clouds, databases, documents), comparisons, tables, timelines, layered stacks, cycles, annotated concepts, "before / after" |
+
+Rule of thumb: if the picture is mostly **boxes joined by arrows with branches**, use `<diagram>`. If it's about
+**what things are and how they relate** — kinds, groups, parts of a whole, a comparison — use `<draw>`.
+Use at most one per answer.
 
 ## 1. Decide whether to draw at all
 
-Draw only when a picture beats words:
+Draw when the user asks you to draw, sketch, diagram, visualise or explain something visual, or is designing a
+system / flow and a corrected version helps more than a list of fixes. Don't draw for plain Q&A, and don't
+redraw what's already on the board: to fix one or two things in the user's drawing, use ink or edits instead.
 
-- the user asked you to draw, sketch or diagram something, or
-- the user is designing a system, flow or process and a corrected or completed version helps more than a list
-  of fixes.
+The card and the drawing split the work. The card says **why** (the insight, what changed, 2–4 bullets). The
+drawing shows **what**. Don't narrate the drawing node by node in the card.
 
-Don't draw for plain Q&A, and don't draw what's already on the board. To fix one or two things in the user's
-own drawing, use ink instead (circle, cross, arrow, note on their regions). Draw a diagram when the fix is a
-redesign: re-ordered steps, a new branch, a missing component, a different structure.
+### Research, then draw
 
-When you do draw, the card and the diagram split the work. The card says *why* (what was wrong, what changed),
-in 2–4 bullets. The diagram shows *what* (the corrected shape). Don't describe the diagram node by node in the
-card.
+When asked to "research X and draw / explain": search first (WebSearch, 2–4 focused queries), read the 2–4 best
+sources (WebFetch), then draw from what you learned. Put concrete facts in labels ("p99 40 ms", "since 2024"),
+keep the card to the key takeaways, and end the card with `Sources: domain.com, other.org`.
 
-## 2. Output contract
+## 2. Design principles (apply to every drawing)
+
+1. **One idea per drawing.** Give it a title (`{"title":"…"}`) that states the idea, not the topic:
+   "Cache misses hit the database" beats "Caching".
+2. **Shape = kind of thing.** Pick the shape by meaning (tables below) and use it consistently: all databases are
+   cylinders, all people are `person`, all external services are clouds. Viewers decode shapes before reading.
+3. **Colour = category or emphasis, never decoration.** At most 3–4 colours in one drawing, roughly 60/30/10:
+   most shapes neutral or one main hue, a secondary hue for a second category, one accent for the thing that
+   matters. Meaning must also be in the words (colour alone isn't enough); add a small legend note if you use
+   colour to encode categories.
+4. **Semantic colours** (match the user's expectations):
+   - `red` — errors, risks, the bottleneck, "wrong". Never for ordinary items.
+   - `green` — success, done, healthy, "new / added", the recommended option.
+   - `yellow` — notes, assumptions, highlights (sticky notes are yellow by default).
+   - `blue` — the main system / your components. Good default primary.
+   - `violet` / `purple` — the user's focus, AI / Claude, special.
+   - `orange` — warnings, in-progress, attention.
+   - `teal` / `cyan` — data, storage, infrastructure.
+   - `grey` — context, external, out-of-scope, "unchanged".
+5. **Hierarchy by size and weight.** The key element can be `"bold":true` or bigger (`"w":1.1`); secondary items
+   normal; context items grey. One bold item per drawing.
+6. **Reading direction.** Left → right for time and pipelines, top → bottom for layers and hierarchies. Put the
+   start top-left. Keep arrows flowing one way; one back-edge at most.
+7. **Alignment and whitespace.** Use whole grid cells; line related items up in the same row or column. Leave an
+   empty column or row between groups rather than cramming. 5–12 shapes reads best; 20+ is a poster.
+8. **Labels: 1–4 words, in the user's terms.** Numbers and specifics in labels ("3 retries", "~95% hit"). Arrow
+   labels ≤ 3 words. Use `\n` for a deliberate second line.
+9. **Group, then summarise.** A `group` box around related shapes names a boundary ("VPC", "Frontend"). A `brace`
+   beside several items summarises them ("one round trip", "Phase 1"). A `bracket` is a lighter version.
+10. **Point at the insight.** Finish with one annotation that carries the message: a `note`, a `brace` with
+    text, a `warning` mark on the risk, a `check` on the recommendation, or numbered `number` badges for steps.
+
+## 3. `<draw>` reference
+
+One JSON object per line (so it can stream). First line may be options. Grid cells: `"at":[col,row]`, fractions
+allowed (`[1.5,0]` sits between columns). Columns and rows automatically widen to fit their shapes, so you only
+choose the arrangement — never pixel positions. Items are drawn in the order written, so write them in reading order:
+title, then shapes along the flow, then arrows, then groups/braces/notes.
 
 ```
-<answer>
-- short bullets…
-</answer>
+<draw>
+{"title":"How a CDN serves a page","style":"color"}
+{"id":"u","shape":"person","text":"Visitor","at":[0,1]}
+{"id":"e","shape":"cloud","text":"Edge cache","at":[1,1],"color":"blue"}
+{"id":"o","shape":"cylinder","text":"Origin DB","at":[2,1],"color":"teal"}
+{"shape":"arrow","from":"u","to":"e","label":"GET /"}
+{"shape":"arrow","from":"e","to":"o","label":"miss","dashed":true}
+{"shape":"brace","around":["e","o"],"side":"bottom","text":"only on a cache miss"}
+{"shape":"note","text":"Hit ratio ~95%","at":[1,2.2]}
+</draw>
+```
+
+Options line: `"title"`, `"style":"color"` (default: coloured fills, dark outlines) or `"style":"ink"` (everything
+in your violet pen, no fills — use it for quick sketches, corrections, or when the board is hand-drawn and
+monochrome).
+
+### Shapes that hold text (choose by meaning)
+
+| shape | looks like | use for (flowchart convention in brackets) |
+|---|---|---|
+| `rect` | rectangle | a step, a component, a thing (process) |
+| `rounded` | rounded rectangle | a service, a softer step, a UI screen |
+| `pill` | stadium | start / end (terminator) |
+| `diamond` | diamond | a decision — label it as a question |
+| `parallelogram` | slanted box | input / output, data in or out (data, I/O) |
+| `cylinder` | database drum | database, storage, a table, a bucket (stored data) |
+| `document` | page with wavy bottom | a document, report, file, config file (document) |
+| `hexagon` | hexagon | preparation, setup, config, a condition to meet (preparation) |
+| `subroutine` | box with side bars | a reusable sub-process, a library, a function (predefined process) |
+| `trapezoid` | trapezoid | a manual step (manual operation) |
+| `queue` | horizontal drum | a queue, stream, topic, buffer |
+| `cloud` | cloud | the internet, a third-party / external service, "the cloud" |
+| `person` | stick figure + name | a user, actor, role, team |
+| `ellipse` / `circle` | oval / circle | an event, a concept in a concept map, a hub, a state |
+| `note` | sticky note (yellow) | an assumption, a tip, a side remark, a number to remember |
+| `callout` | speech bubble | what someone says / asks, a quote, a UI message |
+
+Keys: `id` (to connect it), `text`, `at`, `color` (name or `#hex`), `fill:"none"` for an outline only,
+`"bold":true`, `"dashed":true` (planned / optional / new), `"w"` / `"h"` in cells to resize, `"size":"s|m|l|xl"`
+for the label, `"link":"https://…"`.
+
+### Connectors
+
+`{"shape":"arrow","from":"a","to":"b","label":"calls"}` — keys: `dashed` (async, optional, later), `thick`
+(main path), `ends:"both"` (two-way), `route:"curve"` (to avoid crossing a shape, or for a back-edge),
+`route:"elbow"` (tidy right angles in grids), `head:"dot"|"bar"`. Use `shape:"line"` for an association
+without direction. One arrow per pair of shapes.
+
+### Annotations
+
+| item | keys | use |
+|---|---|---|
+| `brace` | `around:[ids]`, `side:"left|right|top|bottom"`, `text` | curly brace summarising a range: phases, "these 3 are the read path" |
+| `bracket` | same | square bracket, a lighter grouping |
+| `group` | `around:[ids]`, `text`, `color` | dashed boundary box with a title: a system, a team, a network zone |
+| `text` / `title` | `text`, `at`, `size`, `align`, `color` | free text, headings, axis labels, a legend |
+| `table` | `rows:[[…],[…]]`, `at`, `color` | comparisons; first row is the header |
+| `check` / `cross` / `star` / `warning` | `near:id` or `at` | verdicts on a shape: right, wrong, recommended, risky |
+| `number` | `text:"1"`, `near:id` | numbered steps on an architecture: 1 → 2 → 3 |
+
+## 4. Layout recipes for `<draw>`
+
+- **Architecture**: actors (`person`) in column 0, entry points (`cloud`/`rounded`) column 1, services column 2,
+  data (`cylinder`, `queue`) column 3. `group` around each zone, `number` badges for the request path.
+- **Comparison**: a `table` (≤ 5 columns × 6 rows), header row first, then a `check`/`star` near the winner or a
+  `note` with the recommendation. Or two columns of shapes with a `brace` per side.
+- **Timeline**: shapes in one row, `at:[0,0] … [n,0]`, arrows between, dates in labels, a `brace` over a period.
+- **Layered stack**: rectangles in one column, `w:1.6`, top = closest to the user, one colour per layer family,
+  braces on the side naming tiers ("runs in browser").
+- **Cycle**: 4–6 ellipses around a ring (e.g. `[1,0] [2,1] [1,2] [0,1]`), `route:"curve"` arrows.
+- **Concept map**: the central idea as a bold `ellipse` in the middle, related ideas around it, labelled lines.
+- **Before / after**: two groups side by side (`group` "Before", grey; `group` "After", green), with a `cross`
+  on the problem and a `check` on the fix.
+- **Explaining one thing**: the thing in the middle, `callout` / `note` items around it naming its parts, with
+  arrows from the notes to it.
+
+## 5. `<diagram>` (Mermaid) reference
+
+```
 <diagram>
 flowchart TD
-  A[Request] --> B{Cached?}
-  B -->|yes| C[Return cached]
-  B -->|no| D[Query DB]
-</diagram>
-```
-
-- Raw Mermaid inside the tags. Code fences are stripped, but you don't need them.
-- One diagram per answer. Leave the whole `<diagram>` tag out when there's none.
-- **It streams.** Every time a full line arrives, the app re-parses everything so far and redraws it. A line
-  that doesn't parse yet (for example an unclosed `{` or `alt … end` block) is skipped and the last good drawing
-  stays. So:
-  - write the header line first, then edges **in reading order** (top to bottom along the flow), so the
-    diagram visibly grows the way it is read;
-  - give a node its label the first time you mention it (`A[Request] --> B{Cached?}`) instead of declaring all
-    nodes up front and all edges after;
-  - put `classDef`/`class` lines last; they're cosmetic.
-
-## 3. Pick the diagram type
-
-| Use | When | Notes |
-|---|---|---|
-| `flowchart TD` | **Default.** Processes, decisions, request paths, architectures | Top-down fits under the card best |
-| `flowchart LR` | A short linear pipeline (≤ 5 steps, few branches) | Wide diagrams get cramped |
-| `sequenceDiagram` | Who sends what to whom, in order (protocols, auth, API calls) | ≤ 5 participants, ≤ 10 messages |
-| `stateDiagram-v2` | Lifecycles: an order, a connection, a job, a UI mode | `[*]` start/end become circles |
-| `classDiagram` | Types with fields/methods and their relations | Keep members to 2–4 per class |
-| `erDiagram` | Database tables and cardinality | Crow's-foot ends are drawn natively |
-
-Avoid `pie`, `mindmap`, `gitGraph`, `journey`, `sankey` and other types: they're inserted as a flat picture,
-not editable shapes, and don't get your ink style. Gantt, quadrant and timeline convert but rarely fit an
-answer card.
-
-## 4. Flowchart vocabulary (verified against the converter)
-
-Node shapes — only these render as distinct shapes:
-
-| Syntax | Drawn as | Use it for |
-|---|---|---|
-| `A[Text]` | rectangle | a step, a component |
-| `A(Text)` | rounded rectangle | a softer step, a service |
-| `A([Text])` | rounded rectangle | start / end |
-| `A{Text?}` | diamond | a decision (label it as a question) |
-| `A((Text))` | circle | a junction, an event, a single-word state |
-| `A(((Text)))` | double circle | a terminal/accepting state |
-
-`[(DB)]`, `{{hex}}`, `[/para/]`, `[[sub]]` and `>flag]` all fall back to a **plain rectangle**. Don't rely on them
-to mean anything; say it in the label instead: `DB[(Postgres)]` → `DB[Postgres DB]`.
-
-Edges:
-
-| Syntax | Drawn as | Convention on the board |
-|---|---|---|
-| `A --> B` | arrow | normal flow |
-| `A -->\|yes\| B` | arrow with label | decision exits, named calls |
-| `A -.-> B` | dashed arrow | optional, async, background, "later" |
-| `A ==> B` | thick arrow | the main path, or the part you changed |
-| `A --- B` | line, no head | association, "talks to" |
-| `A <--> B` | two-headed arrow | genuinely two-way (one edge, not two) |
-| `A --o B` / `A --x B` | circle / bar head | rarely needed; bar can mean "blocked" |
-
-Styling: everything is redrawn in your ink colour with a transparent fill, so `fill`, `stroke` and `color`
-are ignored. **Dashes and stroke width survive.** Use them to show what's new or what's wrong:
-
-```
-  classDef new stroke-dasharray: 6 4
-  classDef key stroke-width: 4px
-  class C,D new
-```
-
-Say what the convention means in the card ("dashed = new"), the first time you use it.
-
-Links survive too: `click A "https://…"` makes the box clickable. Useful to point at a doc or a file URL.
-
-Font: every label (nodes, edges, sequence messages, class members, state names) is drawn in **Excalifont**,
-Excalidraw's default hand-drawn font, at 16px, the same font the user gets with Excalidraw's text tool.
-Boxes are sized and laid out with Excalifont's measurements. You can't change it: `font-family`, `font-size`
-and `font-weight` in `style`/`classDef` are ignored, as are `<b>`, `<i>`, `<code>`, markdown and Font Awesome
-icons (`fa:fa-…`). Excalifont runs wider than a typical UI font, which is another reason to keep labels short.
-Put emphasis in the wording or use a thick border (`stroke-width`), not in typography.
-
-## 5. Layout rules that keep it clean
-
-The board can't hand-fix a layout, so prevent overlaps up front:
-
-- **At most 10 nodes** (fewer is better; 5–7 reads best under a card). If it needs more, draw the part
-  that changed and put "…" nodes at the edges (`X[... rest of pipeline]`).
-- **No subgraphs.** Their titles collide with nodes; the app may flatten them anyway and drop the title. Put the
-  group in the label: `API[API server: auth]`, `W1[Worker 1]`.
-- **Labels: 1–4 words per node**, a 5th only if unavoidable. Use `<br>` for a deliberate second line:
-  `B["Retry<br>max 3x"]`. Put numbers and details in node labels, not on edges.
-- **Edge labels: 3 words or fewer.** Anything over 18 characters is cut at a word boundary.
-- **One edge per pair of nodes.** For two-way, use a single `<-->`.
-- **Few back-edges.** One retry loop is fine; two or more loops tangle. Prefer an explicit node
-  (`F[Give up]`) over a second loop.
-- **Decisions have 2 (at most 3) labelled exits**: `|yes|` / `|no|`, `|hit|` / `|miss|`.
-- **Fan-out ≤ 4** from one node. Past that, insert a grouping node.
-
-The app renders several variants (as written, with shortened edge labels, without subgraphs, as TD, as LR)
-and keeps the one with the fewest overlapping labels and crossing arrows. Your direction may get flipped if it
-overlaps, so following the rules above is what keeps your choice.
-
-## 6. Syntax that breaks parsing
-
-- `end` as a node id (`B --> end`): reserved. Use `Done`, `Stop`, `Fin`.
-- A node id starting with `o` or `x` right after `--` (`A --oops`) reads as a circle/cross edge. Use
-  `A --> Oops` with a space, or capitalised ids.
-- Parentheses, brackets, quotes, `:`, `#`, `;`, `|` inside a label: wrap the label in double quotes,
-  `A["Retry (3x)"]`. Inside quotes use `#quot;` for a literal quote.
-- Markdown and HTML in labels are stripped (`**bold**` → `bold`). Write plain text.
-- Node ids: short, letters/digits only (`A`, `Auth`, `Q1`). The label is what the user sees.
-- In sequence diagrams, keep `participant X as Long name` on one line, and close every `alt`/`loop`/`opt`
-  with `end`.
-
-## 7. Write labels in the user's words
-
-Diagram labels are saved with your answer. Later, a context picker reads them to decide which earlier card the
-user is pointing at when they draw an arrow or write "this one". Name boxes with the user's own terms from the
-board ("Ingest", "Ranker", "Kafka") rather than generic ones ("Service A", "Step 2"), so their follow-ups find
-the right card.
-
-## 8. Templates
-
-Decision with a retry loop:
-
-```
-flowchart TD
   A([Upload file]) --> B{Valid?}
-  B -->|no| C[Show error]
-  B -->|yes| D[Store in S3]
+  B -->|no| C[/Show error/]
+  B -->|yes| D[(Store in S3)]
   D --> E{Scan OK?}
   E -->|fail| F[Quarantine]
   E -->|pass| G([Publish])
   F -.->|retry once| D
+  classDef bad fill:#ffc9c9,stroke:#e03131
+  classDef good fill:#b2f2bb,stroke:#2f9e44
+  class C,F bad
+  class G good
+</diagram>
 ```
 
-Review of the user's design (dashed = what you added):
+Types: `flowchart TD` (default), `flowchart LR` (short pipelines), `sequenceDiagram` (≤ 5 participants,
+≤ 10 messages), `stateDiagram-v2`, `classDiagram`, `erDiagram`. Avoid pie, mindmap, gitGraph, journey, sankey:
+they become flat pictures, not editable shapes.
 
-```
-flowchart TD
-  U[Client] --> G[API gateway]
-  G --> R[Rate limiter]
-  R --> S[Order service]
-  S --> Q[Queue]
-  Q --> W[Worker]
-  W --> DB[Orders DB]
-  S -.-> C[Cache]
-  classDef new stroke-dasharray: 6 4
-  class R,C new
-```
+Flowchart node shapes — all of these are drawn as real shapes on the board:
 
-Short pipeline:
+| Syntax | Drawn as | Use it for |
+|---|---|---|
+| `A[Text]` | rectangle | a step |
+| `A(Text)` / `A([Text])` | rounded / stadium | a service / start-end |
+| `A{Text?}` | diamond | a decision |
+| `A((Text))` / `A(((Text)))` | circle / double circle | an event, junction / final state |
+| `A[(Text)]` | cylinder | a database, storage |
+| `A{{Text}}` | hexagon | preparation, config |
+| `A[/Text/]` | parallelogram | input / output |
+| `A[/Text\]` | trapezoid | manual step |
+| `A[[Text]]` | box with side bars | sub-process |
+| `A>Text]` | flag / callout | a signal, notification |
 
-```
-flowchart LR
-  A[Parse] --> B[Validate] --> C[Transform] --> D[Load]
-```
+Edges: `-->` arrow, `-->|label|` labelled, `-.->` dashed (async, optional), `==>` thick (main path), `---` line,
+`<-->` two-way.
 
-Request/response:
+**Colour**: without any `classDef`/`style` colours, the diagram is drawn in your violet ink (good for corrections
+and quick sketches). With `classDef name fill:#hex,stroke:#hex` (hex colours only), the colours are kept, so use
+them with the same semantic palette as above. Good pairs (stroke / fill): red `#e03131`/`#ffc9c9`, green
+`#2f9e44`/`#b2f2bb`, blue `#1971c2`/`#a5d8ff`, yellow `#f08c00`/`#ffec99`, violet `#6741d9`/`#d0bfff`,
+orange `#e8590c`/`#ffd8a8`, teal `#099268`/`#96f2d7`, grey `#495057`/`#e9ecef`. `stroke-dasharray: 6 4` and
+`stroke-width: 4px` also survive; say in the card what dashed or thick means.
 
-```
-sequenceDiagram
-  participant B as Browser
-  participant A as Auth server
-  participant API
-  B->>A: login
-  A-->>B: access token
-  B->>API: request + token
-  API-->>B: data
-```
+Layout rules: ≤ 12 nodes, no subgraphs (put the group in the label, or use `<draw>` with `group`), node labels
+1–4 words, edge labels ≤ 3 words, one edge per pair, ≤ 1–2 back-edges, decisions have 2–3 labelled exits,
+fan-out ≤ 4. The app tries several variants (as written, shortened labels, TD, LR) and keeps the cleanest.
 
-Lifecycle:
+Syntax traps: `end` is reserved as a node id (use `Done`); ids starting with `o`/`x` right after `--` read as
+edge heads; quote labels with punctuation `A["Retry (3x)"]`; no markdown or HTML in labels; close every
+`alt`/`loop` in sequence diagrams. Font is always Excalifont 16px.
 
-```
-stateDiagram-v2
-  [*] --> Pending
-  Pending --> Paid: pay
-  Pending --> Cancelled: timeout
-  Paid --> Shipped: ship
-  Shipped --> [*]
-  Cancelled --> [*]
-```
+## 6. Write labels in the user's words
 
-## 9. Checklist before you emit
+Labels are saved with the drawing, and a context picker later uses them to find which earlier drawing the user is
+pointing at. Use the user's own terms from the board ("Ingest", "Ranker", "Kafka"), not "Service A".
 
-1. Is a diagram really better than words or ink here?
-2. Type: flowchart TD unless another row in section 3 clearly fits.
-3. ≤ 10 nodes, no subgraphs, one edge per pair, ≤ 1–2 back-edges.
-4. Node labels ≤ 4 words in the user's terms; edge labels ≤ 3 words; punctuation quoted.
-5. Only the six real shapes; meaning carried by labels, dashes and thick lines, not colour.
-6. Lines in reading order, labels on first mention, `classDef` last.
-7. No `end` ids. Every `alt`/`loop` closed.
-8. The card explains why. It doesn't re-list the boxes.
+## 7. Checklist before you emit
+
+1. Is a picture better than words or ink here? `<diagram>` or `<draw>`?
+2. Title states the idea. 5–12 shapes. One bold focal item.
+3. Every shape chosen for its meaning; same kind → same shape.
+4. ≤ 4 colours, semantic, red only for problems; meaning also in the words.
+5. Reading order: left→right or top→bottom; items written in that order.
+6. Labels ≤ 4 words in the user's terms; arrow labels ≤ 3 words.
+7. One annotation (brace / note / check / warning / numbers) carrying the key message.
+8. The card explains why; it doesn't re-list the shapes.

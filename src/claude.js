@@ -8,7 +8,8 @@ import {
   FONT_FAMILY,
   ROUNDNESS,
 } from "@excalidraw/excalidraw";
-import { regionsFor, markElements, renderInk, applyEdits, INK_COLOR } from "./ink.js";
+import { regionsFor, markElements, renderInk, applyEdits, describeEdits, INK_COLOR } from "./ink.js";
+import { buildDrawing, outlineSkeletons } from "./draw.js";
 
 export const SCOPES = {
   auto: "Auto",
@@ -17,10 +18,32 @@ export const SCOPES = {
   board: "Whole board",
 };
 export const SCOPE_HINTS = {
-  auto: "Your selection if you have one, otherwise whatever you wrote since Claude's last answer (plus what's around it).",
+  auto: "Picks for you: your picked items or selection; otherwise what you wrote since Claude's last answer, plus anything it points at and what's around it. Asking about \"the whole board\" or \"everything\" widens it to the board.",
   selection: "Only the selected elements.",
   viewport: "Everything currently on screen.",
   board: "The entire board.",
+};
+
+// Per-answer model and effort. "" = Claude Code's default.
+export const MODELS = [
+  ["", "Default"],
+  ["opus", "Opus"],
+  ["sonnet", "Sonnet"],
+  ["haiku", "Haiku"],
+  ["fable", "Fable"],
+];
+export const EFFORTS = [
+  ["", "Default"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+  ["xhigh", "Extra high"],
+  ["max", "Max"],
+];
+export const EDIT_MODES = {
+  auto: ["Auto", "Claude edits your content when your request asks for a change (\"make it colourful\", \"rename X\"). Reviews and questions never change it."],
+  ask: ["Ask first", "Claude proposes edits; you preview, then apply or discard them."],
+  off: ["Off", "Claude never changes existing content. It marks it up with ink instead."],
 };
 
 const VIOLET = "#6741d9";
@@ -97,34 +120,89 @@ function newInk(all) {
   return all.filter((e) => !isClaude(e) && (e.updated ?? 0) > last + 500);
 }
 
+/** Split elements into clusters of nearby things (each picked area becomes its own focus image). */
+function clusters(els, gap = 360) {
+  const items = els.map((e) => ({ e, b: boundsOf([e]) }));
+  const parent = items.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < items.length; i++)
+    for (let j = i + 1; j < items.length; j++) if (rectDist(items[i].b, items[j].b) < gap) parent[find(i)] = find(j);
+  const groups = new Map();
+  items.forEach((it, i) => groups.set(find(i), [...(groups.get(find(i)) || []), it.e]));
+  return [...groups.values()].sort((a, b) => boundsOf(a).minY - boundsOf(b).minY || boundsOf(a).minX - boundsOf(b).minX);
+}
+
+/** What new ink points at: existing content its strokes touch (an arrow's tip, a circle around a word). */
+function touchedBy(fresh, all) {
+  const freshIds = new Set(fresh.map((e) => e.id));
+  const out = new Map();
+  for (const f of fresh) {
+    if (f.type !== "freedraw" && f.type !== "arrow" && f.type !== "line") continue;
+    const fb = boundsOf([f]);
+    const area = Math.max(1, (fb.maxX - fb.minX) * (fb.maxY - fb.minY));
+    for (const e of elementsOverlappingBBox({ elements: all, bounds: grow(fb, 12), type: "overlap" })) {
+      if (freshIds.has(e.id) || e.type === "frame" || e.type === "magicframe" || isPending(e)) continue;
+      const eb = boundsOf([e]);
+      // skip big backgrounds the stroke merely sits on
+      if ((eb.maxX - eb.minX) * (eb.maxY - eb.minY) > area * 12 && !isClaude(e)) continue;
+      out.set(e.id, e);
+    }
+  }
+  return [...out.values()];
+}
+
+const WHOLE_BOARD_RE = /\b(whole|entire|full) (board|page|canvas)\b|\beverything\b|\ball (of )?(the |my )?(boxes|shapes|notes|cards|text|diagrams|things|content)\b|\b(summar(y|ise|ize)|overview of) (this|the|my) (board|page)\b|\bacross the board\b/i;
+
 /**
- * Returns { scope, context, focus }:
- *   context – what goes in the overview snapshot
- *   focus   – what Claude should respond to (selection or new ink); may be empty
+ * Returns { scope, context, focus, focusGroups }:
+ *   context     – what goes in the overview snapshot
+ *   focus       – what Claude should respond to (picked items, selection or new ink); may be empty
+ *   focusGroups – focus split into clusters, one focus image each (picked items can be far apart)
  */
-function selectTargets(api, scope) {
+function selectTargets(api, scope, { picks = [], question = "", threadIds = null } = {}) {
   const all = live(api).filter((e) => !isPending(e));
   const appState = api.getAppState();
   const selected = all.filter((e) => appState.selectedElementIds?.[e.id]);
   const visible = () => elementsOverlappingBBox({ elements: all, bounds: getVisibleSceneBounds(appState), type: "overlap" });
   const fresh = newInk(all);
+  const around = (focus, margin = CONTEXT_MARGIN) =>
+    clusters(focus).flatMap((c) => elementsOverlappingBBox({ elements: all, bounds: grow(boundsOf(c), margin), type: "overlap" }));
+  const result = (sc, focus, margin) => {
+    const groups = clusters(focus);
+    return { scope: sc, focus, focusGroups: groups, context: expand([...focus, ...around(focus, groups.length > 1 ? 380 : margin)], all) };
+  };
 
+  // a comment thread: the commented elements (and the thread's own picks)
+  if (threadIds) {
+    const ids = new Set(threadIds);
+    const focus = expand(all.filter((e) => ids.has(e.id)), all);
+    if (focus.length) return result("comment", focus);
+  }
+  // items picked from anywhere on the board (the context tray)
+  const pickedIds = new Set(picks);
+  const picked = all.filter((e) => pickedIds.has(e.id));
+  if ((scope === "auto" || scope === "picks") && picked.length) {
+    const focus = expand([...picked, ...(scope === "auto" ? selected : [])], all);
+    return result("picks", focus);
+  }
+  if (scope === "auto" && WHOLE_BOARD_RE.test(question || "") && !selected.length) {
+    return { scope: "board", focus: [], focusGroups: [], context: expand(all, all) };
+  }
   if ((scope === "auto" || scope === "selection") && selected.length) {
-    const focus = expand(selected, all);
-    const around = elementsOverlappingBBox({ elements: all, bounds: grow(boundsOf(focus), CONTEXT_MARGIN), type: "overlap" });
-    return { scope: "selection", focus, context: expand([...focus, ...around], all) };
+    return result("selection", expand(selected, all));
   }
   if (scope === "auto" && fresh.length) {
-    const focus = expand(fresh, all).filter((e) => !isClaude(e));
-    const around = elementsOverlappingBBox({ elements: all, bounds: grow(boundsOf(focus), CONTEXT_MARGIN), type: "overlap" });
-    return { scope: "new", focus, context: expand([...focus, ...around], all) };
+    const mine = expand(fresh, all).filter((e) => !isClaude(e));
+    const focus = expand([...mine, ...touchedBy(mine, all)], all);
+    return result("new", focus);
   }
   let context = scope === "board" ? all : visible();
   if (!context.length) context = all;
   context = expand(context, all);
   const ids = new Set(context.map((e) => e.id));
   const focus = fresh.filter((e) => ids.has(e.id));
-  return { scope: scope === "board" ? "board" : "viewport", focus: focus.length < context.filter((e) => !isClaude(e)).length ? focus : [], context };
+  const f = focus.length < context.filter((e) => !isClaude(e)).length ? focus : [];
+  return { scope: scope === "board" ? "board" : "viewport", focus: f, focusGroups: f.length ? [f] : [], context };
 }
 
 // ------------------------------------------------------------- summary ----
@@ -272,7 +350,7 @@ export function findFreeSpot(w, h, anchor, obstacles, GAP = 48) {
 const translate = (els, dx, dy) => els.map((e) => ({ ...e, x: e.x + dx, y: e.y + dy }));
 
 // --------------------------------------------------------- answer cards ---
-const SCOPE_TITLES = { selection: "Selection", new: "New ink", viewport: "Visible page", board: "Whole board" };
+const SCOPE_TITLES = { selection: "Selection", new: "New ink", viewport: "Visible page", board: "Whole board", picks: "Picked items", comment: "Comment" };
 
 function headerText(scope, question) {
   const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -397,17 +475,70 @@ const withExcalifont = (skeletons) =>
     return s;
   });
 
+// Mermaid node shapes the converter draws as plain rectangles, and the outline we give them instead.
+const MERMAID_SHAPES = [
+  [/^\[\(/, "cylinder"],
+  [/^\{\{/, "hexagon"],
+  [/^\[\[/, "subroutine"],
+  [/^\[\/.*\\\]$/, "trapezoid"],
+  [/^\[[\/\\]/, "parallelogram"],
+  [/^>/, "callout"],
+];
+function mermaidNodeShapes(src) {
+  if (!/^\s*(flowchart|graph)\b/im.test(src)) return new Map();
+  const shapes = new Map();
+  const re = /(?:^|[\s;&>-])([A-Za-z][\w]*)\s*(\[\(|\{\{|\[\[|\[\/|\[\\|>)([^\n]*?)(\)\]|\}\}|\]\]|\/\]|\\\]|\])/g;
+  for (const line of src.split("\n")) {
+    for (const m of line.matchAll(re)) {
+      const token = m[2] + m[3] + m[4];
+      const hit = MERMAID_SHAPES.find(([r]) => r.test(token));
+      if (hit && !shapes.has(m[1])) shapes.set(m[1], hit[1]);
+    }
+  }
+  return shapes;
+}
+
+/** Does the diagram set its own colours? Then keep them instead of redrawing it in ink. */
+const isStyled = (src) => /^\s*(classDef|style)\b[^\n]*\b(fill|stroke|color)\s*:\s*#/im.test(src);
+
+/** Swap plain rectangles for the shape the Mermaid source asked for (cylinder, hexagon…). */
+function decorateShapes(skeletons, shapes) {
+  if (!shapes.size) return skeletons;
+  const out = [];
+  for (const s of skeletons) {
+    const nodeId = s.type === "rectangle" && s.id ? [...shapes.keys()].find((k) => s.id === k || new RegExp(`^flowchart-${k}-\\d+$`).test(s.id)) : null;
+    if (!nodeId) {
+      out.push(s);
+      continue;
+    }
+    const shape = shapes.get(nodeId);
+    const groupIds = [...(s.groupIds || []), `shape-${s.id}`];
+    const style = {
+      strokeColor: s.strokeColor || "#1e1e1e", backgroundColor: s.backgroundColor || "transparent", fillStyle: "solid",
+      strokeWidth: s.strokeWidth || 2, strokeStyle: s.strokeStyle || "solid", roughness: 1, groupIds,
+    };
+    let { x, y, width: w, height: h } = s;
+    if (shape === "cylinder") { y -= 16; h += 20; }
+    out.push(...outlineSkeletons(shape, x, y, w, h, style));
+    // the label would inherit the (now transparent) stroke colour, so give it its own
+    const label = s.label ? { ...s.label, strokeColor: s.label.strokeColor || "#1e1e1e" } : s.label;
+    out.push({ ...s, label, strokeColor: "transparent", backgroundColor: "transparent", groupIds, roundness: null });
+  }
+  return out;
+}
+
 async function diagramElements(mermaid, { quick = false } = {}) {
   const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
   const src = mermaid.trim();
   const flat = shortenEdgeLabels(flattenSubgraphs(src));
   const variants = quick ? [src] : [src, shortenEdgeLabels(src), flat, setDirection(flat, "TD"), setDirection(flat, "LR")];
+  const shapes = mermaidNodeShapes(src);
   let best = null;
   for (const v of [...new Set(variants)]) {
     try {
       const { elements, files } = await parseMermaidToExcalidraw(v, { themeVariables: { fontSize: "16px" } });
-      const els = convertToExcalidrawElements(withExcalifont(elements), { regenerateIds: true });
-      const score = overlapScore(els);
+      const els = convertToExcalidrawElements(decorateShapes(withExcalifont(elements), shapes), { regenerateIds: true });
+      const score = overlapScore(els.filter((e) => e.type !== "line" || e.customData));
       if (!best || score < best.score) best = { elements: els, files, score, variant: v };
       if (score === 0) break;
     } catch (e) {
@@ -415,11 +546,15 @@ async function diagramElements(mermaid, { quick = false } = {}) {
     }
   }
   if (!best) throw new Error("could not convert the diagram");
-  return best;
+  return { ...best, styled: isStyled(src) };
 }
 
-// Suggested diagrams are drawn by hand in Claude's ink colour.
-const inkStyle = (e) => (e.type === "text" ? { strokeColor: INK_COLOR } : { strokeColor: INK_COLOR, roughness: 1, backgroundColor: "transparent", fillStyle: "solid" });
+// Suggested diagrams are drawn by hand in Claude's ink colour, unless Claude coloured them on purpose.
+const inkStyle = (e) =>
+  e.type === "text"
+    ? { strokeColor: INK_COLOR }
+    : { strokeColor: e.strokeColor === "transparent" ? "transparent" : INK_COLOR, roughness: 1, backgroundColor: "transparent", fillStyle: "solid" };
+const styleDiagram = (e, styled) => (styled ? (e.type === "text" ? {} : { roughness: 1 }) : inkStyle(e));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -490,6 +625,7 @@ function scrollIntoViewIfNeeded(api, els) {
   if (!visible) api.scrollToContent(els, { animate: true, fitToViewport: false });
 }
 
+
 // -------------------------------------------------------- running asks ---
 // Observable list of in-flight asks, for the UI (status line, timer, cancel).
 const running = new Map();
@@ -501,6 +637,66 @@ export const onRunningChange = (fn) => {
 };
 export const cancelAsk = (id) => running.get(id)?.controller.abort();
 
+// ------------------------------------------------------ edit proposals ---
+// With edits on "Ask first", Claude's edits wait here until the user applies or discards them.
+const proposals = new Map();
+const proposalListeners = new Set();
+const notifyProposals = () => proposalListeners.forEach((l) => l([...proposals.values()]));
+export const onProposalsChange = (fn) => {
+  proposalListeners.add(fn);
+  fn([...proposals.values()]);
+  return () => proposalListeners.delete(fn);
+};
+
+function computeEdits(api, p) {
+  return applyEdits({ commands: p.commands, regions: p.regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
+}
+
+/** Show (or hide) a proposal on the board without recording it in undo history. */
+export function previewProposal(api, id, on) {
+  const p = proposals.get(id);
+  if (!p) return;
+  if (on && !p.preview) {
+    const { changed } = computeEdits(api, p);
+    const before = new Map();
+    for (const e of api.getSceneElementsIncludingDeleted()) if (changed.has(e.id)) before.set(e.id, e);
+    p.preview = before;
+    api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e), captureUpdate: CaptureUpdateAction.NEVER });
+  } else if (!on && p.preview) {
+    const before = p.preview;
+    p.preview = null;
+    api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map((e) => before.get(e.id) || e), captureUpdate: CaptureUpdateAction.NEVER });
+  }
+  notifyProposals();
+}
+
+export function applyProposal(api, id) {
+  const p = proposals.get(id);
+  if (!p) return;
+  previewProposal(api, id, false);
+  const { changed, done, skipped } = computeEdits(api, p);
+  proposals.delete(id);
+  notifyProposals();
+  if (!changed.size) return api.setToast({ message: "Nothing to change: those parts of the board are gone.", duration: 3000 });
+  api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e), captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+  api.setToast({ message: `Applied ${done} edit${done === 1 ? "" : "s"}${skipped.length ? ` (${skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`, duration: 4000 });
+}
+
+export function discardProposal(api, id) {
+  previewProposal(api, id, false);
+  proposals.delete(id);
+  notifyProposals();
+}
+
+/** Bounds of the elements a proposal touches, to scroll to them. */
+export function proposalTargets(api, id) {
+  const p = proposals.get(id);
+  if (!p) return [];
+  const ids = new Set(p.regions.filter((r) => p.targets.includes(r.id)).flatMap((r) => r.ids));
+  return live(api).filter((e) => ids.has(e.id));
+}
+
+// ------------------------------------------------------------ network ---
 async function* ndjson(res) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -519,54 +715,132 @@ async function* ndjson(res) {
   if (buf.trim()) yield JSON.parse(buf);
 }
 
+// ---------------------------------------------------------- animation ---
+const bump = (e, patch) => ({ ...e, ...patch, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31) });
+
+/** One frame of an element being drawn: lines grow from their start, everything else fades in. */
+function frameOf(e, t) {
+  if ((e.type === "line" || e.type === "arrow") && e.points?.length >= 2) {
+    const pts = e.points;
+    const total = pts.slice(1).reduce((a, p, i) => a + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]), 0) || 1;
+    let left = total * t;
+    const out = [pts[0]];
+    for (let i = 1; i < pts.length && left > 0; i++) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+      const seg = Math.hypot(x1 - x0, y1 - y0) || 1;
+      const k = Math.min(1, left / seg);
+      out.push([x0 + (x1 - x0) * k, y0 + (y1 - y0) * k]);
+      left -= seg;
+    }
+    if (out.length < 2) out.push(pts[0]);
+    return bump(e, { points: out, endArrowhead: t < 0.98 ? null : e.endArrowhead, opacity: e.opacity });
+  }
+  return bump(e, { opacity: Math.round((e.opacity ?? 100) * Math.min(1, 0.15 + t)) });
+}
+
+/**
+ * Animate temporary (pending) elements in place: each step's lines are drawn
+ * out and its shapes fade in, one step after another. The caller commits the
+ * real elements afterwards.
+ */
+async function animateSteps(api, els, steps, { frames = 6, delay = 18 } = {}) {
+  const byId = new Map(els.map((e) => [e.id, e]));
+  const shown = new Set();
+  const ids = new Set(els.map((e) => e.id));
+  const put = (extra) =>
+    api.updateScene({
+      elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !ids.has(e.id)), ...els.filter((e) => shown.has(e.id)), ...extra],
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
+  for (const step of steps) {
+    const stepEls = step.map((id) => byId.get(id)).filter(Boolean);
+    if (!stepEls.length) continue;
+    for (let f = 1; f <= frames; f++) {
+      put(stepEls.map((e) => frameOf(e, f / frames)));
+      await sleep(delay);
+    }
+    step.forEach((id) => shown.add(id));
+  }
+  put([]);
+}
+
 // ----------------------------------------------------------------- main ---
 // Text is wrapped by measuring it, so the card and ink fonts must be loaded first;
 // otherwise lines are wrapped for a narrower fallback font and overflow the card.
 const fontsReady = () =>
   Promise.all(["14px Nunito", "17px Nunito", "20px Excalifont", "16px Excalifont"].map((f) => document.fonts.load(f))).catch(() => {});
 
-export async function askClaude(api, { scope, question, cwd }) {
+const MODEL_NAMES = Object.fromEntries(MODELS.filter(([k]) => k));
+const shortModel = (m) => {
+  if (!m) return "";
+  const s = String(m).replace(/^claude-/, "").replace(/-\d{8}$/, "").replace(/\[.*\]$/, "");
+  return MODEL_NAMES[s] || s.replace(/-(\d+)-(\d+)$/, " $1.$2").replace(/^\w/, (c) => c.toUpperCase());
+};
+
+/**
+ * Ask Claude about part of the board.
+ *   scope     auto | selection | viewport | board | picks
+ *   picks     element ids picked from anywhere on the board (context tray)
+ *   model, effort   per-answer overrides ("" = Claude Code's default)
+ *   editMode  auto | ask | off
+ *   thread    a comment thread { id, elementIds, messages, sessionId, engine, cwd }: the reply goes
+ *             to `reply` callbacks instead of a card; drawings, ink and edits still land on the board.
+ */
+export async function askClaude(api, { scope = "auto", question = "", cwd, model = "", effort = "", editMode = "auto", picks = [], thread = null, reply = null }) {
   const askedAt = Date.now();
   await fontsReady();
-  const t = selectTargets(api, scope);
-  if (!t.context.length) {
+  const t = selectTargets(api, thread ? "viewport" : scope, { picks, question, threadIds: thread?.elementIds });
+  if (!t.context.length && !thread) {
     api.setToast({ message: "The board is empty — draw something first.", duration: 3000 });
+    return;
+  }
+  if (!t.context.length) t.context = live(api);
+  if (!t.context.length) {
+    reply?.error("The board is empty.");
     return;
   }
   const hasFocus = t.focus.length > 0;
   const userContext = t.context.filter((e) => !isClaude(e));
   const anchor = boundsOf(hasFocus ? t.focus : userContext.length ? userContext : t.context);
-  const [image, focusImage] = await Promise.all([
+  const groups = (t.focusGroups?.length ? t.focusGroups : hasFocus ? [t.focus] : []).slice(0, 5);
+  const [image, ...focusImages] = await Promise.all([
     snapshot(api, t.context, 2200),
-    hasFocus ? snapshot(api, t.focus, 1600) : null,
+    ...groups.map((g) => snapshot(api, g, groups.length > 1 ? 1200 : 1600)),
   ]);
   const summary = summarize(t.context, new Set(t.focus.map((e) => e.id)));
   const prior = priorAnswers(live(api), anchor);
   // Labelled regions (R1…, D1…, C1…) so Claude can point at things with its ink and edit them.
   const regions = regionsFor(t.context);
   const marksImage = regions.length ? await snapshot(api, [...t.context, ...markElements(regions)], 2200) : null;
-  const regionList = regions.map((r) => ({ id: r.id, kind: r.kind, label: r.label, style: r.style, focus: hasFocus && r.ids.some((i) => t.focus.some((f) => f.id === i)) }));
+  const focusIds = new Set(t.focus.map((e) => e.id));
+  const regionList = regions.map((r) => ({ id: r.id, kind: r.kind, label: r.label, style: r.style, focus: hasFocus && r.ids.some((i) => focusIds.has(i)) }));
   const header = headerText(t.scope, question);
+  const choice = [shortModel(model), effort && EFFORTS.find(([k]) => k === effort)?.[1].toLowerCase() + " effort"].filter(Boolean).join(" · ");
 
   const runId = rid();
   const controller = new AbortController();
-  running.set(runId, { id: runId, scope: t.scope, startedAt: askedAt, status: "Sending…", controller });
+  running.set(runId, { id: runId, scope: t.scope, startedAt: askedAt, status: "Sending…", controller, label: thread ? "Comment" : null, choice });
   notify();
 
-  // Placeholder card: reserves room for a typical answer and fills in live.
+  // ---- where things go: a placeholder card (answers) or straight into the thread (comments)
   const pendingGroup = rid();
-  let placeholder = cardElements({ header, body: "Claude is looking at your drawing…", groupId: pendingGroup, pending: true });
-  const pb = boundsOf(placeholder);
-  const spot = findFreeSpot(pb.maxX - pb.minX, 400, anchor, live(api));
-  placeholder = translate(placeholder, spot.x - pb.minX, spot.y - pb.minY);
-  insert(api, placeholder, CaptureUpdateAction.NEVER);
-  scrollIntoViewIfNeeded(api, placeholder);
-  let placeholderIds = new Set(placeholder.map((e) => e.id));
+  let placeholderIds = new Set();
+  let spot = null;
+  if (!thread) {
+    let placeholder = cardElements({ header, body: "Claude is looking at your drawing…", groupId: pendingGroup, pending: true });
+    const pb = boundsOf(placeholder);
+    spot = findFreeSpot(pb.maxX - pb.minX, 400, anchor, live(api));
+    placeholder = translate(placeholder, spot.x - pb.minX, spot.y - pb.minY);
+    insert(api, placeholder, CaptureUpdateAction.NEVER);
+    scrollIntoViewIfNeeded(api, placeholder);
+    placeholderIds = new Set(placeholder.map((e) => e.id));
+  }
 
   let shown = { status: "", answer: "" };
   let renderTimer = 0;
   const render = () => {
     renderTimer = 0;
+    if (thread) return;
     const body = shown.answer || shown.status || "Claude is looking at your drawing…";
     const head = shown.answer && shown.status ? `${header}  ·  ${shown.status}` : header;
     let next = cardElements({ header: head, body, groupId: pendingGroup, pending: true });
@@ -578,44 +852,66 @@ export async function askClaude(api, { scope, question, cwd }) {
     });
     placeholderIds = new Set(next.map((e) => e.id));
   };
-  // The diagram is redrawn under the card every time another line streams in.
-  let partialIds = new Set();
-  let diagramBusy = false;
-  let diagramNext = null;
-  const drawPartialDiagram = async (src) => {
-    if (diagramBusy) {
-      diagramNext = src;
-      return;
-    }
-    diagramBusy = true;
-    try {
-      const { elements: dEls, files } = await diagramElements(src, { quick: true });
-      if (files) api.addFiles(Object.values(files));
+
+  // ---- the visual (Mermaid diagram or freeform drawing), redrawn as it streams in
+  let visualSpot = null; // top-left for the visual in comment mode, chosen once
+  const placeVisual = (els) => {
+    const vb = boundsOf(els);
+    if (!thread) {
       const card = api.getSceneElements().filter((e) => placeholderIds.has(e.id));
       const cb = card.length ? boundsOf(card) : { minX: spot.x, maxY: spot.y + 200 };
-      const db = boundsOf(dEls);
-      const placed = translate(dEls, cb.minX - db.minX, cb.maxY + 48 - db.minY).map((e) => ({
-        ...e, ...inkStyle(e), customData: { claudePending: true, role: "diagram" },
-      }));
+      return translate(els, cb.minX - vb.minX, cb.maxY + 56 - vb.minY);
+    }
+    if (!visualSpot) visualSpot = findFreeSpot(Math.max(vb.maxX - vb.minX, 600), Math.max(vb.maxY - vb.minY, 420), anchor, live(api).filter((e) => !partialIds.has(e.id)));
+    return translate(els, visualSpot.x - vb.minX, visualSpot.y - vb.minY);
+  };
+  let partialIds = new Set();
+  let partialEls = [];
+  let visualBusy = false;
+  let visualNext = null;
+  const drawPrefix = `d${rid()}`;
+  const drawPartial = async (job) => {
+    if (visualBusy) {
+      visualNext = job;
+      return;
+    }
+    visualBusy = true;
+    try {
+      let els, newSteps = [];
+      if (job.kind === "diagram") {
+        const { elements, files, styled } = await diagramElements(job.src, { quick: true });
+        if (files) api.addFiles(Object.values(files));
+        els = elements.map((e) => ({ ...e, ...styleDiagram(e, styled) }));
+      } else {
+        const d = buildDrawing(job.items, { prefix: drawPrefix });
+        // keep each element's hand-drawn wobble stable while the drawing grows
+        const seeds = new Map(partialEls.map((e) => [e.id, e.seed]));
+        els = d.elements.map((e) => (seeds.has(e.id) ? { ...e, seed: seeds.get(e.id) } : e));
+        newSteps = d.steps.filter((st) => st.some((id) => !seeds.has(id)));
+      }
+      const placed = placeVisual(els).map((e) => ({ ...e, customData: { claudePending: true, role: "diagram" } }));
       api.updateScene({
-        elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !partialIds.has(e.id)), ...placed],
+        elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !partialIds.has(e.id)), ...placed.filter((e) => !newSteps.flat().includes(e.id))],
         captureUpdate: CaptureUpdateAction.NEVER,
       });
       partialIds = new Set(placed.map((e) => e.id));
+      partialEls = placed;
+      if (newSteps.length) await animateSteps(api, placed, [placed.filter((e) => !newSteps.flat().includes(e.id)).map((e) => e.id), ...newSteps], { frames: 5, delay: 16 });
+      if (thread && partialIds.size === placed.length && placed.length) scrollIntoViewIfNeeded(api, placed);
     } catch {
       // a half-written diagram may not parse yet; keep the last good one
     } finally {
-      diagramBusy = false;
-      if (diagramNext) {
-        const n = diagramNext;
-        diagramNext = null;
-        drawPartialDiagram(n);
+      visualBusy = false;
+      if (visualNext) {
+        const n = visualNext;
+        visualNext = null;
+        drawPartial(n);
       }
     }
   };
-  const settleDiagram = async () => {
-    diagramNext = null;
-    while (diagramBusy) await sleep(20);
+  const settleVisual = async () => {
+    visualNext = null;
+    while (visualBusy) await sleep(20);
   };
 
   const update = (patch) => {
@@ -625,6 +921,10 @@ export async function askClaude(api, { scope, question, cwd }) {
       r.status = shown.answer ? shown.status || "Writing…" : shown.status;
       notify();
     }
+    if (thread) {
+      if (patch.answer !== undefined) reply?.delta(shown.answer);
+      if (patch.status) reply?.status(patch.status);
+    }
     if (!renderTimer) renderTimer = setTimeout(render, 150);
   };
 
@@ -632,7 +932,11 @@ export async function askClaude(api, { scope, question, cwd }) {
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ image, focusImage, marksImage, regions: regionList, summary, question, scope: t.scope, prior, cwd }),
+      body: JSON.stringify({
+        image, focusImage: focusImages[0] || null, extraFocusImages: focusImages.slice(1), marksImage, regions: regionList, summary, question,
+        scope: t.scope, prior, cwd, model, effort, editMode,
+        thread: thread ? { messages: thread.messages, sessionId: thread.sessionId || null, engine: thread.engine || null, cwd: thread.cwd || null } : null,
+      }),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -640,65 +944,104 @@ export async function askClaude(api, { scope, question, cwd }) {
       throw new Error(err.error || `HTTP ${res.status}`);
     }
     let data = null;
+    let drew = false;
     for await (const ev of ndjson(res)) {
       if (ev.type === "status") update({ status: ev.text });
       else if (ev.type === "context")
-        update({ status: ev.ids.length ? `Using ${ev.ids.length} earlier answer${ev.ids.length > 1 ? "s" : ""}…` : "Answering…" });
+        update({ status: ev.ids.length ? `Using ${ev.ids.length} earlier answer${ev.ids.length > 1 ? "s" : ""}…` : thread ? "Replying…" : "Answering…" });
       else if (ev.type === "delta") update({ answer: ev.answer, status: "" });
-      else if (ev.type === "diagram") {
-        if (!partialIds.size) update({ status: "Drawing the diagram…" });
-        drawPartialDiagram(ev.mermaid);
-      }
-      else if (ev.type === "error") throw new Error(ev.error);
+      else if (ev.type === "diagram" || ev.type === "draw") {
+        if (!drew) update({ status: "Drawing…" });
+        drew = true;
+        drawPartial(ev.type === "diagram" ? { kind: "diagram", src: ev.mermaid } : { kind: "draw", items: ev.items });
+      } else if (ev.type === "error") throw new Error(ev.error);
       else if (ev.type === "done") data = ev;
     }
     clearTimeout(renderTimer);
     if (!data) throw new Error("the connection closed before Claude finished");
 
     const groupId = rid();
+    const modelLabel = shortModel(data.modelUsed || data.model);
     const meta = {
       question: question || "", scope: t.scope, askId: data.id, sessionId: data.sessionId, engine: data.engine || "claude", cwd: data.cwd,
-      askedAt, contextIds: data.contextIds, followUpOf: data.followUpOf,
+      askedAt, contextIds: data.contextIds, followUpOf: data.followUpOf, model: data.model || "", effort: data.effort || "",
+      ...(thread ? { threadId: thread.id } : {}),
     };
     const cost = data.costUsd ? ` · $${data.costUsd.toFixed(2)}` : "";
     const used = data.contextIds?.length ? ` · ${data.contextIds.length} earlier` : "";
-    let block = cardElements({
-      header: `${data.engine === "codex" ? header.replace("✦ Claude", "✦ Codex (Claude out of budget)") : header}  (${(data.durationMs / 1000).toFixed(0)}s${cost}${used})`,
-      body: data.answer || "(empty answer)",
-      groupId,
-      meta,
-    });
+    const who = [modelLabel, data.effort].filter(Boolean).join(" ");
+    let block = thread
+      ? []
+      : cardElements({
+          header: `${data.engine === "codex" ? header.replace("✦ Claude", "✦ Codex (Claude out of budget)") : header}  (${(data.durationMs / 1000).toFixed(0)}s${cost}${used}${who ? ` · ${who}` : ""})`,
+          body: data.answer || "(empty answer)",
+          groupId,
+          meta,
+        });
 
-    if (data.diagram) {
+    // ---- the final visual: rebuilt from the full source, styled and titled
+    let visual = [];
+    let visualSteps = [];
+    let visualTitle = "Suggested diagram";
+    if (data.draw?.length) {
       try {
-        const { elements: dEls, files } = await diagramElements(data.diagram);
+        const d = buildDrawing(data.draw, { prefix: `${drawPrefix}f` });
+        const seeds = new Map(partialEls.map((e) => [e.id, e.seed]));
+        visual = d.elements.map((e) => {
+          const s = seeds.get(e.id.replace(`${drawPrefix}f-`, `${drawPrefix}-`));
+          return s ? { ...e, seed: s } : e;
+        });
+        visualSteps = d.steps;
+        visualTitle = data.draw.find((i) => i && !i.shape && i.title) ? "Drawing" : "Suggested drawing";
+      } catch (e) {
+        console.warn("drawing failed", e);
+      }
+    } else if (data.diagram) {
+      try {
+        const { elements: dEls, files, styled } = await diagramElements(data.diagram);
         if (files) api.addFiles(Object.values(files));
-        const cb = boundsOf(block);
-        const db = boundsOf(dEls);
-        const title = convertToExcalidrawElements([
-          { type: "text", x: 0, y: 0, text: "Suggested diagram", fontSize: 14, fontFamily: FONT_FAMILY.Nunito, strokeColor: VIOLET },
-        ]);
-        const titled = translate(title, cb.minX - title[0].x, cb.maxY + 28);
-        const placed = translate(dEls, cb.minX - db.minX, cb.maxY + 56 - db.minY);
-        block = [
-          ...block,
-          ...[...titled, ...placed].map((e) => ({
-            ...e,
-            groupIds: [...(e.groupIds || []), groupId],
-            customData: { claude: true, ...meta, role: "diagram" },
-            ...(e === titled[0] ? {} : inkStyle(e)),
-          })),
-        ];
+        visual = dEls.map((e) => ({ ...e, ...styleDiagram(e, styled) }));
+        // shapes first, then the arrows between them
+        const isEdge = (e) => e.type === "arrow" || (e.type === "text" && visual.find((a) => a.id === e.containerId)?.type === "arrow");
+        visualSteps = [visual.filter((e) => !isEdge(e)).map((e) => e.id), visual.filter(isEdge).map((e) => e.id)];
       } catch (e) {
         console.warn("mermaid conversion failed", e);
       }
     }
+    if (visual.length) {
+      const vb = boundsOf(visual);
+      const title = convertToExcalidrawElements([
+        { type: "text", x: 0, y: 0, text: thread ? `✦ ${visualTitle} · from a comment` : visualTitle, fontSize: 14, fontFamily: FONT_FAMILY.Nunito, strokeColor: VIOLET },
+      ]);
+      const cb = block.length ? boundsOf(block) : null;
+      let placed, titled;
+      if (cb) {
+        titled = translate(title, cb.minX - title[0].x, cb.maxY + 28);
+        placed = translate(visual, cb.minX - vb.minX, cb.maxY + 56 - vb.minY);
+      } else {
+        const w = vb.maxX - vb.minX, h = vb.maxY - vb.minY + 28;
+        const at = visualSpot || findFreeSpot(w, h, anchor, live(api).filter((e) => !partialIds.has(e.id)));
+        titled = translate(title, at.x - title[0].x, at.y);
+        placed = translate(visual, at.x - vb.minX, at.y + 28 - vb.minY);
+      }
+      block = [
+        ...block,
+        ...[...titled, ...placed].map((e) => ({
+          ...e,
+          groupIds: [...(e.groupIds || []), groupId],
+          customData: { claude: true, ...meta, role: "diagram" },
+        })),
+      ];
+    }
 
-    await settleDiagram();
+    await settleVisual();
+    const hadPartial = partialIds.size > 0;
     removeById(api, new Set([...placeholderIds, ...partialIds]));
-    const b = boundsOf(block);
-    const at = findFreeSpot(b.maxX - b.minX, b.maxY - b.minY, anchor, live(api));
-    block = translate(block, at.x - b.minX, at.y - b.minY);
+    if (!thread) {
+      const b = boundsOf(block);
+      const at = findFreeSpot(b.maxX - b.minX, b.maxY - b.minY, anchor, live(api));
+      block = translate(block, at.x - b.minX, at.y - b.minY);
+    }
 
     // Claude's ink: marks on the content plus handwritten notes in free space.
     let ink = [];
@@ -719,45 +1062,73 @@ export async function askClaude(api, { scope, question, cwd }) {
         })(),
         place: (wd, ht, near, extra) => findFreeSpot(wd, ht, near, [...now, ...block, ...extra], 28),
         groupId: rid(),
-        meta: { askId: data.id, askedAt },
+        meta: { askId: data.id, askedAt, ...(thread ? { threadId: thread.id } : {}) },
         seed: askedAt,
-        writeAnchor: boundsOf(block.filter((e) => e.customData?.role === "bg")),
+        writeAnchor: (() => {
+          const bg = block.filter((e) => e.customData?.role === "bg");
+          return bg.length ? boundsOf(bg) : block.length ? boundsOf(block) : anchor;
+        })(),
       });
     }
-    insert(api, block);
-    scrollIntoViewIfNeeded(api, block);
 
-    // Edits to existing content (recolour, retype, remove), applied as one undoable step.
-    if (Array.isArray(data.edits) && data.edits.length) {
-      const { changed, done, skipped } = applyEdits({
-        commands: data.edits,
-        regions,
-        elementsById: new Map(live(api).map((e) => [e.id, e])),
-      });
-      if (skipped.length) console.warn("some edits were skipped:", skipped);
-      if (changed.size) {
-        api.updateScene({
-          elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e),
-          captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-        });
-        api.setToast({
-          message: `Claude edited ${done} part${done === 1 ? "" : "s"} of the board${skipped.length ? ` (${skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`,
-          duration: 5000,
-        });
+    if (block.length) {
+      // No streaming happened (e.g. Codex): draw the visual out before committing it.
+      if (!hadPartial && visual.length) {
+        const temp = block.map((e) => ({ ...e, customData: { ...e.customData, claudePending: true } }));
+        const cardIds = temp.filter((e) => e.customData.role !== "diagram").map((e) => e.id);
+        const drawIds = new Set(temp.filter((e) => e.customData.role === "diagram").map((e) => e.id));
+        const steps = visualSteps.length ? visualSteps.map((s) => s.filter((id) => drawIds.has(id))) : [[...drawIds]];
+        const titleIds = [...drawIds].filter((id) => !steps.flat().includes(id));
+        await animateSteps(api, temp, [cardIds, titleIds, ...steps], { frames: 5, delay: 16 });
+        removeById(api, new Set(temp.map((e) => e.id)));
+      }
+      insert(api, block);
+      scrollIntoViewIfNeeded(api, block);
+    }
+
+    // Edits to existing content (recolour, retype, move, remove).
+    let proposal = null;
+    if (Array.isArray(data.edits) && data.edits.length && editMode !== "off") {
+      if (editMode === "ask") {
+        const targets = [...new Set(data.edits.flatMap((c) => (Array.isArray(c.targets) ? c.targets : [c.target])).filter(Boolean).map((x) => String(x).toUpperCase()))];
+        proposal = { id: rid(), askId: data.id, commands: data.edits, regions, targets, lines: describeEdits(data.edits, regions), createdAt: Date.now(), source: thread ? "comment" : "card" };
+        proposals.set(proposal.id, proposal);
+        notifyProposals();
+      } else {
+        const { changed, done, skipped } = applyEdits({ commands: data.edits, regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
+        if (skipped.length) console.warn("some edits were skipped:", skipped);
+        if (changed.size) {
+          api.updateScene({
+            elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e),
+            captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+          });
+          api.setToast({
+            message: `Claude edited ${done} part${done === 1 ? "" : "s"} of the board${skipped.length ? ` (${skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`,
+            duration: 5000,
+          });
+        }
       }
     }
+    reply?.done({
+      answer: data.answer || "(empty answer)", sessionId: data.sessionId, engine: data.engine, cwd: data.cwd, model: modelLabel, effort: data.effort || "",
+      durationMs: data.durationMs, costUsd: data.costUsd, drew: visual.length > 0, inked: ink.length > 0, proposalId: proposal?.id || null,
+      edited: !!(Array.isArray(data.edits) && data.edits.length && editMode === "auto"),
+      askId: data.id,
+    });
     if (ink.length) await animateInk(api, ink);
   } catch (e) {
     clearTimeout(renderTimer);
-    await settleDiagram();
+    await settleVisual();
     removeById(api, new Set([...placeholderIds, ...partialIds]));
     const aborted = controller.signal.aborted || e.message === "cancelled";
-    api.setToast(
-      aborted
-        ? { message: "Cancelled.", duration: 2000 }
-        : { message: `Claude failed: ${e.message.slice(0, 300)}`, closable: true, duration: 10000 },
-    );
-    if (!aborted) throw e;
+    if (thread) reply?.error(aborted ? "Cancelled." : e.message.slice(0, 300));
+    else
+      api.setToast(
+        aborted
+          ? { message: "Cancelled.", duration: 2000 }
+          : { message: `Claude failed: ${e.message.slice(0, 300)}`, closable: true, duration: 10000 },
+      );
+    if (!aborted && !thread) throw e;
   } finally {
     running.delete(runId);
     notify();
@@ -765,4 +1136,4 @@ export async function askClaude(api, { scope, question, cwd }) {
 }
 
 // Debug hook (used by tests / devtools).
-window.__wbDebug = { selectTargets, newInk };
+window.__wbDebug = { selectTargets, newInk, buildDrawing, diagramElements };

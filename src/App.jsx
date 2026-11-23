@@ -7,11 +7,11 @@ import { PRESETS, loadPenSettings, savePenSettings } from "./pens.js";
 import { clearInk, inkState, setInkHidden } from "./ink.js";
 import Boards from "./Boards.jsx";
 import { SCOPES, SCOPE_HINTS, askClaude, cancelAsk, onRunningChange } from "./claude.js";
-
-const LS = {
-  get: (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
-};
+import { LS, comments, picks, prefs, ui, useStore } from "./store.js";
+import {
+  AskOptions, CommentPins, CommentsPanel, ContextTray, PickHighlights, ProposalsPanel, SelectionBar, ThreadPopover,
+  useCommentCount, useOverlayShortcuts, useView,
+} from "./Overlay.jsx";
 // The open board: ?board=<id>, else the last one you had open, else "default".
 const BOARD = new URLSearchParams(location.search).get("board") || LS.get("whiteboard.lastBoard", "default");
 LS.set("whiteboard.lastBoard", BOARD);
@@ -26,6 +26,8 @@ const loadBoard = async () => {
     const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`);
     if (!r.ok) return { appState: { currentItemRoughness: 0 }, scrollToContent: true };
     const data = await r.json();
+    // comment threads are saved alongside the elements
+    comments.set(Array.isArray(data.comments) ? data.comments.map((t) => ({ ...t, messages: (t.messages || []).map((m) => (m.pending ? { ...m, pending: false, error: m.text ? undefined : "Interrupted (the page was reloaded)." } : m)) })) : []);
     return { ...data, scrollToContent: true };
   } catch {
     return null;
@@ -45,9 +47,14 @@ function useRunning() {
   return list;
 }
 
-const SCOPE_SHORT = { selection: "Selection", new: "New ink", viewport: "Page", board: "Board" };
+const SCOPE_SHORT = { selection: "Selection", new: "New ink", viewport: "Page", board: "Board", picks: "Picked", comment: "Comment" };
+
+const EDIT_HINT = "Auto lets Claude change your content when you ask for a change; Ask first shows a preview to apply or discard; Off only marks up.";
 
 function ClaudeControls({ api }) {
+  const pickList = useStore(picks);
+  const commentCount = useCommentCount();
+  const u = useStore(ui);
   const [open, setOpen] = useState(false);
   const [question, setQuestion] = useState("");
   const [defaultScope, setDefaultScope] = useState(() => LS.get("whiteboard.claude.scope.v2", "auto"));
@@ -85,7 +92,8 @@ function ClaudeControls({ api }) {
   const run = useCallback(
     (s, q) => {
       if (!api) return;
-      askClaude(api, { scope: s, question: q, cwd }).catch((e) => console.error(e));
+      const p = prefs.get();
+      askClaude(api, { scope: s, question: q, cwd, model: p.model, effort: p.effort, editMode: p.editMode, picks: picks.get().flatMap((x) => x.elementIds) }).catch((e) => console.error(e));
     },
     [api, cwd],
   );
@@ -114,7 +122,10 @@ function ClaudeControls({ api }) {
           {running.length ? <span className="spinner" /> : "✦"} <span className="claude-label">Ask Claude</span>
           <small>{SCOPES[defaultScope]}</small>
         </button>
-        <button className="claude-caret" onClick={() => { setScope(defaultScope); refreshInk(); setOpen((o) => !o); }} title="Ask with a question, choose scope or project folder">▾</button>
+        <button className="claude-caret" onClick={() => { setScope(defaultScope); refreshInk(); setOpen((o) => !o); }} title="Ask with a question; choose model, effort, edits, scope or project folder">▾</button>
+        <button className={`comments-btn ${u.panel ? "on" : ""}`} onClick={() => ui.set((s) => ({ ...s, panel: !s.panel }))} title="Comments (Alt+M)">
+          💬{commentCount > 0 && <span className="badge">{commentCount}</span>}
+        </button>
       </div>
 
       {running.length > 0 && (
@@ -122,7 +133,7 @@ function ClaudeControls({ api }) {
           {running.map((r) => (
             <div key={r.id} className="run-row">
               <span className="spinner dark" />
-              <span className="run-status" title={r.status}>{SCOPE_SHORT[r.scope] || r.scope} · {r.status || "Working…"}</span>
+              <span className="run-status" title={`${r.status}${r.choice ? ` (${r.choice})` : ""}`}>{SCOPE_SHORT[r.scope] || r.scope} · {r.status || "Working…"}</span>
               <span className="run-time">{Math.round((Date.now() - r.startedAt) / 1000)}s</span>
               <button className="run-cancel" title="Cancel" onClick={() => cancelAsk(r.id)}>✕</button>
             </div>
@@ -134,7 +145,7 @@ function ClaudeControls({ api }) {
         <div className="claude-pop" onKeyDown={(e) => e.stopPropagation()}>
           <textarea
             autoFocus
-            placeholder="Optional. You can also just write your question on the board."
+            placeholder="Optional. You can also just write on the board. Try “research X online and draw a flowchart”, “explain this”, “make it colourful”."
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => {
@@ -149,7 +160,9 @@ function ClaudeControls({ api }) {
               </label>
             ))}
           </div>
-          <p className="hint">{SCOPE_HINTS[scope]}</p>
+          <p className="hint">{SCOPE_HINTS[scope]}{pickList.length > 0 && (scope === "auto" || scope === "selection") ? ` You have ${pickList.length} picked item${pickList.length > 1 ? "s" : ""}: Auto uses them.` : ""}</p>
+          <AskOptions />
+          <p className="hint">Model and effort apply to each answer; Default uses Claude Code's own default. Edits: {EDIT_HINT}</p>
           <label className="cwd-row">
             <span>Project folder</span>
             <input
@@ -227,7 +240,8 @@ export default function App() {
   const save = useCallback(async () => {
     if (!api) return;
     const elements = api.getSceneElements().filter((e) => !e.customData?.claudePending);
-    const body = serializeAsJSON(elements, api.getAppState(), api.getFiles(), "local");
+    const scene = JSON.parse(serializeAsJSON(elements, api.getAppState(), api.getFiles(), "local"));
+    const body = JSON.stringify({ ...scene, comments: comments.get().filter((t) => t.messages.length) });
     setSaveStatus("saving");
     try {
       const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body, keepalive: body.length < 60000 });
@@ -292,6 +306,22 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", flush);
   }, [save]);
 
+  // comments are part of the board file: save when they change
+  useEffect(() => {
+    return comments.subscribe(() => {
+      clearTimeout(saveRef.current.timer);
+      setSaveStatus("unsaved");
+      saveRef.current.timer = setTimeout(() => { saveRef.current.timer = 0; save(); }, 800);
+    });
+  }, [save]);
+
+  const view = useView(api);
+  useOverlayShortcuts(api);
+  const ask = useCallback(
+    (opts) => api && askClaude(api, { cwd: LS.get(`whiteboard.cwd.${BOARD}`, ""), ...opts }).catch((e) => console.error(e)),
+    [api],
+  );
+
   const onChange = (elements, appState) => {
     const isPen = appState.activeTool.type === "custom" && appState.activeTool.customType === "pen";
     if (isPen !== penActive) setPenActive(isPen);
@@ -319,6 +349,7 @@ export default function App() {
       >
         <MainMenu>
           <MainMenu.Item onSelect={() => setBoardsSignal((n) => n + 1)} shortcut="">Boards…</MainMenu.Item>
+          <MainMenu.Item onSelect={() => ui.set((s) => ({ ...s, panel: true }))} shortcut="Alt+M">Comments…</MainMenu.Item>
           <MainMenu.Separator />
           <MainMenu.DefaultItems.LoadScene />
           <MainMenu.DefaultItems.SaveToActiveFile />
@@ -334,6 +365,13 @@ export default function App() {
         </MainMenu>
       </Excalidraw>
       <Boards board={BOARD} status={saveStatus} onOpen={openBoard} openSignal={boardsSignal} />
+      <PickHighlights view={view} />
+      <CommentPins view={view} />
+      {api && <SelectionBar api={api} view={view} board={BOARD} onAsk={ask} />}
+      {api && <ThreadPopover api={api} view={view} board={BOARD} />}
+      {api && <CommentsPanel api={api} />}
+      {api && <ContextTray api={api} view={view} onAsk={ask} />}
+      <ProposalsPanel api={api} />
       <PenDock
         settings={penSettings}
         penId={penId}

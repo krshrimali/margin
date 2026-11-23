@@ -53,6 +53,39 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   draws the strokes with the same pen engine you use. Notes go in free space; marks sit on your content but on
   their own layer. **Alt+I** hides or shows the layer, and the ▾ menu can also clear it. Ink is undoable like
   anything else.
+- **Model, effort and edits, per answer.** The ▾ menu, the selection toolbar's *Ask*, the context tray and every
+  comment box have three pickers. **Model** (Default, Opus, Sonnet, Haiku, Fable) and **Effort** (Default, Low …
+  Max) apply to that answer; *Default* means Claude Code's own default, and that's what they start at on each load.
+  The model and effort used are shown in the card header and on comment replies. **Edits** (remembered):
+  *Auto* lets Claude change your content when your request asks for a change, *Ask first* shows Claude's edits in a
+  panel (bottom left) where you **Preview**, **Apply** (one undo step) or **Discard** them, and *Off* never
+  changes your content; Claude marks it up with ink instead.
+- **Selection toolbar.** Select anything and a small toolbar appears above it: **💬 Comment**, **✦ Ask** (type a
+  question about just that) and **＋ Pick**.
+- **Picking context from several places** (Alt+P, or *Pick*). Picked items get numbered dashed outlines and appear
+  in the **Context** tray at the bottom, so you can pan elsewhere, pick more, and then *Ask* or *Comment* on all of
+  them together. Each area is sent to Claude as its own focus image. *Auto* scope uses your picks when there are
+  any. Click a chip to jump to it; ✕ removes it.
+- **Auto scope**, in order: picked items → your selection → what you wrote since Claude's last answer *plus anything
+  it points at or touches* (an arrow to a box, a circle around a word) → the visible page. Asking about "the whole
+  board" or "everything" widens it to the whole board.
+- **Comments.** Comment on any element, your content or Claude's (select it → 💬 Comment or Alt+C). Threads show
+  as pins next to what they're about; 💬 next to the Ask button (Alt+M) lists them, with resolved ones hidden by
+  default. Post a plain comment, or mention **@claude** / press **✦ Ask Claude** to get a reply in the thread.
+  Claude sees the commented elements and the whole thread (it continues the same session on follow-ups), and if
+  you ask it to draw, mark up or change something, it does that on the board next to the commented element. The
+  reply shows a link to what it drew. Comments are saved in the board file.
+- **Drawing.** Besides Mermaid diagrams (`<diagram>`), Claude can draw freeform with shapes (`<draw>`, see
+  `src/draw.js`): rectangles, rounded boxes, pills, ellipses, circles, diamonds, parallelograms, cylinders
+  (databases), documents, hexagons, subroutines, trapezoids, queues, clouds, people, sticky notes, speech bubbles,
+  curly braces, square brackets, dashed group boxes, tables, ticks, crosses, stars, warnings and numbered badges,
+  joined by straight, curved or elbow arrows that stay attached when you move things. Shapes are placed on a grid
+  whose columns and rows grow to fit their labels and arrow labels. Colours come from Excalidraw's palette. Mermaid
+  nodes like `[(DB)]`, `{{prep}}`, `[/io/]`, `[[sub]]` now get their real shapes too, and diagrams keep the colours
+  Claude gives them with `classDef` (otherwise they're drawn in Claude's violet ink). Drawings build up item by
+  item while Claude writes them: lines draw themselves and shapes fade in.
+- **Research.** Ask "research X online and then draw a flowchart / explain it" and Claude searches the web, reads
+  a few sources, answers with a `Sources:` line and draws what it found.
 - **Edits.** When you ask for existing content to change ("make it colourful", "rename X to Y", "fix the typo",
   "update your diagram", "remove that box"), Claude edits the regions in place instead of telling you how: it
   recolours fills, strokes, ink and text, retypes typed text and labels (boxes grow to fit), or removes regions.
@@ -60,8 +93,11 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   be recoloured but not retyped). A review or a question never changes your content silently. All edits from one
   answer are a single undo step (Ctrl+Z).
 - **Diagram skill.** Claude is started with `--plugin-dir agent-plugin`, which gives it the `board-diagrams` skill
-  (`agent-plugin/skills/board-diagrams/SKILL.md`). It loads the skill before drawing: which Mermaid shapes, arrows and
-  styles survive the conversion onto the board, layout rules that avoid overlaps, and templates. Codex doesn't load it.
+  (`agent-plugin/skills/board-diagrams/SKILL.md`). It loads the skill before drawing: when to use `<draw>` or
+  `<diagram>`, which shape means what (standard flowchart conventions plus architecture shapes), a semantic colour
+  palette (3–4 colours, red only for problems), design rules (one idea per drawing, hierarchy, reading order),
+  layout recipes (architecture, comparison, timeline, stack, cycle, before/after) and templates. Codex doesn't load
+  it, but gets the shape reference in its prompt.
 - **Project folder** (in the ▾ menu, saved per board): the folder Claude works in when your board refers to code.
 - Claude runs as `claude -p --dangerously-skip-permissions` (headless, all tools allowed).
 
@@ -81,7 +117,7 @@ Environment variables:
 |---|---|---|
 | `PORT` | 3311 | server port |
 | `CLAUDE_CWD` | `data/workspace` | default project folder (each board can override it in the UI) |
-| `CLAUDE_MODEL` | (CLI default) | model for answers, e.g. `opus`, `sonnet` |
+| `CLAUDE_MODEL` | (CLI default) | default model for answers when the UI says *Default*, e.g. `opus`, `sonnet` |
 | `CLAUDE_SELECT_MODEL` | `haiku` | model that picks relevant earlier answers |
 | `CLAUDE_BIN` | `claude` | path to the Claude Code CLI |
 | `CLAUDE_TIMEOUT_MS` | 600000 | per-request timeout |

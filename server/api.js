@@ -215,9 +215,10 @@ function runCodex({ prompt, images, cwd, schema, timeoutMs, onStatus, onChild, w
 
 const imageBlock = (b64) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: b64 } });
 
-function imageBlocks(focusB64, contextB64, marksB64) {
+function imageBlocks(focusB64, contextB64, marksB64, extraFocus = []) {
   const blocks = [];
-  if (focusB64) blocks.push({ type: "text", text: "FOCUS image:" }, imageBlock(focusB64));
+  if (focusB64) blocks.push({ type: "text", text: extraFocus.length ? "FOCUS image 1:" : "FOCUS image:" }, imageBlock(focusB64));
+  extraFocus.forEach((b64, i) => blocks.push({ type: "text", text: `FOCUS image ${i + 2}:` }, imageBlock(b64)));
   blocks.push({ type: "text", text: focusB64 ? "CONTEXT image (surroundings):" : "BOARD image:" }, imageBlock(contextB64));
   if (marksB64) blocks.push({ type: "text", text: "MARKS image (same as above, with labelled regions R1, R2…, your diagram shapes D1, D2… and your cards C1, C2…):" }, imageBlock(marksB64));
   return blocks;
@@ -303,21 +304,42 @@ Ink commands (a JSON array inside <ink></ink>):
   {"do":"strike","target":"R6"}                          cross out something that should go
   {"do":"arrow","from":"R2","to":"R7","label":"retry"}   draw a missing connection
   {"do":"bracket","targets":["R1","R2"],"note":"same step"}  group several regions
+  {"do":"brace","targets":["R1","R2"],"note":"one phase"}    a curly brace beside several regions
   {"do":"note","near":"R6","text":"add a cache here"}    a handwritten note with an arrow to R6
   {"do":"write","text":"..."}                            a handwritten explanation (up to 40 words) written beside your card
 Notes are short handwriting, at most 8 words, and are placed in free space automatically. Give each region at most one note; several notes on the same region are merged into one list. When the user asks you to explain by hand or write things out, use "write". Use at most 8 commands.
-If the user asks you to draw a diagram or flowchart, put it in <diagram>. It is drawn by hand in your ink colour. Use ink when pointing at specific parts of the drawing explains it better than words, as in reviews, corrections, "this one" or "missing link". Then keep the card text shorter, because the ink carries the message. Plain questions with nothing to point at need no ink.`;
+Use ink when pointing at specific parts of the drawing explains it better than words, as in reviews, corrections, "this one" or "missing link". Then keep the card text shorter, because the ink carries the message. Plain questions with nothing to point at need no ink.`;
 
-const EDIT_HELP = `You can also EDIT what is already on the board: the user's content (R…) and your own diagrams (D…), not answer cards (C…).
-Edit commands (a JSON array inside <edit></edit>):
+const EDIT_COMMANDS = `Edit commands (a JSON array inside <edit></edit>):
   {"do":"style","targets":["R1","D2"],"fill":"#ffc9c9","stroke":"#e03131"}   recolour shapes (fill only affects boxes, ellipses, diamonds)
   {"do":"style","target":"R6","textColor":"#1971c2"}                         colour typed text or a box's label
   {"do":"style","target":"R4","stroke":"#2f9e44","strokeWidth":2,"strokeStyle":"dashed","fillStyle":"solid"}
   {"do":"relabel","target":"D3","text":"new label"}                          replace the typed text of a region
   {"do":"relabel","target":"R2","from":"old words","text":"new words"}      replace part of it
+  {"do":"move","target":"R5","dx":120,"dy":0}                                 nudge a region (scene px) to tidy a layout
   {"do":"delete","target":"R9"}                                              remove a region (only when the user asks to remove it)
 Colours that suit the board: stroke #1e1e1e #e03131 #2f9e44 #1971c2 #f08c00 #9c36b5 #0c8599; fill #ffc9c9 #b2f2bb #a5d8ff #ffec99 #eebefa #ffd8a8 #99e9f2 #e9ecef. For handwriting and pen strokes, "stroke" recolours the ink; handwriting can't be relabelled (strike it and add a note instead).
-Decide from the request whether to edit. When the user asks to change existing content, for example "make it colourful", "colour the errors red", "rename X to Y", "fix the typo", "correct my diagram", "update your diagram" or "remove that box", do it with <edit> instead of describing how they could do it themselves, and keep the card to a line or two saying what you changed. When they ask for a review, an explanation or feedback, don't silently change their content: mark it with ink and suggest the fix. To restructure one of your own diagrams beyond recolouring or renaming, draw a new <diagram> instead. Group regions that get the same change into one command with "targets". At most 60 commands.`;
+Group regions that get the same change into one command with "targets". At most 60 commands. To restructure one of your own diagrams beyond recolouring, renaming or moving, draw a new one instead.`;
+
+const EDIT_POLICY = {
+  auto: `EDITING IS ON (Claude decides). You may change existing content: the user's (R…) and your own diagrams (D…), never answer cards (C…).
+Decide from the request whether an edit is wanted. When the user asks to change existing content ("make it colourful", "colour the errors red", "rename X to Y", "fix the typo", "correct my diagram", "tidy this up", "update your diagram", "remove that box"), do it with <edit> instead of describing how, and keep the card to a line or two saying what you changed. Also edit, unasked, only for an unambiguous typo in typed text in the focus. When they ask for a review, an explanation or feedback, don't silently change their content: mark it with ink and suggest the fix.`,
+  ask: `EDITING NEEDS APPROVAL. You may PROPOSE changes to existing content: the user's (R…) and your own diagrams (D…), never answer cards (C…). Your <edit> commands are shown to the user, who applies or discards them, so propose an edit whenever it is the best way to do what they asked (recolour, rename, fix, tidy, remove). Say in the card, in one line, what the proposed edit does.`,
+  off: `EDITING IS OFF. The user has not allowed you to change existing content. Don't output <edit>. If a change would help, mark it with ink or say it in the card, and mention that they can allow edits in the ▾ menu.`,
+};
+
+const DRAW_HELP = `FREEFORM DRAWING (<draw>): when a picture explains better than a flowchart (an explainer, a comparison, a labelled concept sketch, an architecture with databases, clouds, users and braces, a timeline, a table), draw it with shapes. One JSON object per line inside <draw></draw>; the first line may set options. Positions are grid cells: "at":[col,row], fractions allowed, one cell is about 220×140 px; shapes are centred in their cell. Write items in reading order: they are drawn one by one as they stream in.
+  {"title":"How a CDN serves a page","style":"color"}                 options: style "color" (default, coloured fills) or "ink" (your violet pen)
+  {"id":"u","shape":"person","text":"Visitor","at":[0,1]}
+  {"id":"e","shape":"cloud","text":"Edge cache","at":[1,1],"color":"blue"}
+  {"id":"o","shape":"cylinder","text":"Origin DB","at":[2,1],"color":"green"}
+  {"shape":"arrow","from":"u","to":"e","label":"GET /"}
+  {"shape":"arrow","from":"e","to":"o","label":"miss","dashed":true}
+  {"shape":"brace","around":["e","o"],"side":"bottom","text":"only on a cache miss"}
+  {"shape":"note","text":"Hit ratio ~95%","at":[1,2.2],"color":"yellow"}
+Shapes with text: rect, rounded, pill (start/end), ellipse, circle, diamond (decision), parallelogram (input/output), cylinder (database/storage), document, hexagon (preparation/config), subroutine, cloud (internet/external service), person (user/actor), note (sticky note), callout (speech bubble), queue. Others: text (free text; "size":"s|m|l|xl"), title (big heading), arrow / line (from,to ids; "label", "dashed", "thick", "ends":"both", "route":"straight|curve|elbow"), brace (curly brace; "around":[ids], "side":"left|right|top|bottom", "text"), bracket (square bracket, same keys), group (a dashed box around ids with a title: "around":[ids],"text"), table ("rows":[["Head","Head"],["a","b"]], "at"), check / cross / star / warning (small marks, "at" or "near":id), number (a numbered circle "text":"1", "near":id).
+Item keys: "w"/"h" in cells to make a shape bigger (default 0.75×0.5), "color": red, orange, yellow, green, teal, blue, violet, pink, grey (or a hex), "fill":"none" for an outline only, "bold":true for a thick border, "dashed":true.
+Before drawing, load the board-diagrams skill for the shape vocabulary, colour rules and layout templates. At most ~30 items.`;
 
 function regionText(regions) {
   if (!regions?.length) return "";
@@ -327,18 +349,35 @@ function regionText(regions) {
     .join("\n");
 }
 
-function buildPrompt({ hasFocus, summary, question, scope, earlier, cwd, resumed, regions, engine = "claude" }) {
+const threadText = (thread) =>
+  (thread?.messages || [])
+    .slice(-20)
+    .map((m) => `${m.author === "claude" ? "You" : "User"}: ${String(m.text || "").slice(0, 1500)}`)
+    .join("\n");
+
+function buildPrompt({ hasFocus, focusCount = 1, summary, question, scope, earlier, cwd, resumed, regions, engine = "claude", editMode = "auto", thread }) {
+  const comment = !!thread;
   const images = hasFocus
-    ? `- FOCUS image: ${SCOPE_LABEL[scope] || SCOPE_LABEL.new}. Respond to this.
+    ? `- FOCUS image${focusCount > 1 ? `s 1–${focusCount}` : ""}: ${SCOPE_LABEL[scope] || SCOPE_LABEL.new}.${focusCount > 1 ? " The user picked these parts from different places on the board; treat them together." : ""} Respond to this.
 - CONTEXT image: the surrounding board, for context only.`
     : `- BOARD image: ${SCOPE_LABEL[scope] || "the board"}. Respond to it.`;
   const earlierText = earlier.length
     ? earlier.map((p, i) => `${i + 1}. [${p.askedAt}]${p.question ? ` typed question: "${p.question}"` : ""}\n${p.text}`).join("\n\n")
     : "(none relevant)";
+  const edit = EDIT_POLICY[editMode] || EDIT_POLICY.auto;
+  const canEdit = regions?.length && editMode !== "off";
+  const skill = engine === "claude" ? " Before writing a <diagram> or <draw>, load the board-diagrams skill: it lists the shapes, colours and layouts that work on the board, with templates." : "";
 
-  return `${resumed ? "The user has added something new to the board in reply to your answer above.\n\n" : ""}You live inside a hand-drawn whiteboard app. The user writes and draws on the board, mostly by hand, and asks you to respond. Your reply goes on the board as a card next to their content.
+  const intro = comment
+    ? `You live inside a hand-drawn whiteboard app. The user attached a COMMENT THREAD to part of the board (the FOCUS image) and is talking to you in it. Your reply goes into the thread, like a reply in a design tool's comments.
 
-${engine === "codex" ? `The attached images, in order: ${hasFocus ? "FOCUS, CONTEXT" : "BOARD"}${regions?.length ? ", MARKS" : ""}.` : "The images attached above:"}
+Thread so far:
+${threadText(thread)}`
+    : `${resumed ? "The user has added something new to the board in reply to your answer above.\n\n" : ""}You live inside a hand-drawn whiteboard app. The user writes and draws on the board, mostly by hand, and asks you to respond. Your reply goes on the board as a card next to their content.`;
+
+  return `${intro}
+
+${engine === "codex" ? `The attached images, in order: ${hasFocus ? `FOCUS${focusCount > 1 ? ` ×${focusCount}` : ""}, CONTEXT` : "BOARD"}${regions?.length ? ", MARKS" : ""}.` : "The images attached above:"}
 ${images}${regions?.length ? "\n- MARKS image: the same board with labelled regions R1, R2…, your diagram shapes D1, D2… and your cards C1, C2…" : ""}
 Violet cards labelled "✦ Claude" are your earlier answers.
 
@@ -347,24 +386,27 @@ ${earlierText}
 
 Typed text, shapes and arrows extracted from the board (handwriting is not included; [NEW] = added since your last answer):
 ${summary || "(none)"}
-${regions?.length ? `\nLabelled regions in the MARKS image (R = the user's content, D = shapes of your diagrams, C = your answer cards; current colours in brackets):\n${regionText(regions)}\n\n${INK_HELP}\n\n${EDIT_HELP}\n` : ""}
-${question?.trim() ? `\nThe user also typed: "${question.trim()}"\n` : ""}
+${regions?.length ? `\nLabelled regions in the MARKS image (R = the user's content, D = shapes of your diagrams, C = your answer cards; current colours in brackets):\n${regionText(regions)}\n\n${INK_HELP}\n\n${edit}${canEdit ? `\n${EDIT_COMMANDS}` : ""}\n` : ""}
+${question?.trim() ? `\nThe user ${comment ? "just wrote in the thread" : "also typed"}: "${question.trim()}"\n` : ""}
 How to respond:
 - Work out the intent from the content itself:
   - A question: answer it.
   - A diagram, flow or design: review it. Say what's wrong or missing and give concrete fixes.
   - Notes or a plan: help with what they're working toward.
   - An arrow, circle or note pointing at one of your earlier cards or diagrams: a follow-up about it.
+  - A request to change existing content: follow the editing rule above.
+  - A request to research, look up, compare or check current facts ("research online…", "what's the latest…"): use WebSearch and WebFetch first (a few focused searches, read the best 2–4 sources), then answer, and draw if they asked for a drawing. End the card with one line "Sources: domain.com, other.org".
+  - A request to explain, teach or "explain me this": explain simply, and add a drawing whenever a picture would make it click.
 - If an earlier answer already covers something, don't repeat it. Write one line such as "Covered in my earlier card on X" and add only what's new.
 - Start with the answer itself. Don't restate the question, and don't open with "What I see".
-- Keep it short: at most about 120 words, in short bullets. The user can ask for more detail.
+- ${comment ? "Reply like a colleague in a comment thread: 1–5 short sentences or bullets, about 80 words at most. If they asked you to draw, edit or mark something up, do it with the blocks below and say in one line what you did." : "Keep it short: about 120 words, in short bullets (up to 200 for research or an explanation the user asked for). The user can ask for more detail."}
 - Use plain text only, with no markdown (#, **, backticks, tables or links). Use "- " bullets, "1." lists and, rarely, a short CAPITALISED label.
-- Add a diagram only when the user asks you to draw, or is designing a system, flow or process and a corrected version would help more than words. Never add one for plain Q&A. When you do, put a Mermaid flowchart, sequenceDiagram, stateDiagram-v2, classDiagram or erDiagram with at most 10 nodes inside <diagram></diagram>.${engine === "claude" ? " Before writing it, load the board-diagrams skill: it lists the shapes, arrows and styles that survive conversion onto the board, and templates." : ""} It is laid out automatically, so keep it simple to avoid overlaps:
-  - no subgraphs (put the group in the node label instead, e.g. "GPU (graphics card)"),
-  - edge labels of 3 words or fewer; put numbers and details in node labels,
-  - one arrow per pair of nodes, using "-->" (a single "<-->" is fine for two-way),
-  - prefer "flowchart TD"; use LR only for a short left-to-right pipeline.
-- Tools: most answers need none. Only when the board refers to a specific codebase, file or project should you look it up. Your working directory (the user's project folder) is ${cwd}.
+- Draw when the user asks you to draw, sketch, diagram, visualise or explain something visual, or is designing a system, flow or process and a corrected version would help more than words. Never for plain Q&A. Two ways, use at most one per answer:
+  - <diagram>: Mermaid (flowchart, sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram), laid out automatically. Best for processes with decisions, message sequences, state machines and data models. At most 12 nodes, no subgraphs, edge labels of 3 words or fewer, one arrow per pair of nodes, prefer "flowchart TD".
+  - <draw>: freeform shapes you place yourself (see below). Best for explainers, architectures with distinct kinds of things (people, clouds, databases, documents), comparisons, tables, timelines and annotated concepts.${skill}
+- Tools: most answers need none. Use WebSearch/WebFetch for research requests, and read files only when the board refers to a specific codebase, file or project. Your working directory (the user's project folder) is ${cwd}.
+
+${DRAW_HELP}
 
 Output format (exactly):
 <answer>
@@ -372,13 +414,16 @@ Output format (exactly):
 </answer>
 <diagram>
 ...optional mermaid, omit the whole tag if none...
-</diagram>${regions?.length ? `
+</diagram>
+<draw>
+...optional, one JSON object per line, omit the whole tag if none...
+</draw>${regions?.length ? `
 <ink>
 [...optional ink commands, omit the whole tag if none...]
-</ink>
+</ink>${canEdit ? `
 <edit>
 [...optional edit commands, omit the whole tag if none...]
-</edit>` : ""}`;
+</edit>` : ""}` : ""}`;
 }
 
 function stripMarkdown(s) {
@@ -402,7 +447,7 @@ function visibleAnswer(text) {
 
 function parseAnswer(text) {
   let answer = visibleAnswer(text);
-  if (!answer) answer = stripMarkdown(text.replace(/<(diagram|ink|edit)>[\s\S]*?<\/\1>/gi, "").trim());
+  if (!answer) answer = stripMarkdown(text.replace(/<(diagram|draw|ink|edit)>[\s\S]*?<\/\1>/gi, "").trim());
   const m = text.match(/<diagram>([\s\S]*?)<\/diagram>/i);
   let diagram = m ? m[1].replace(/^\s*```(?:mermaid)?\s*/i, "").replace(/```\s*$/, "").trim() : null;
   const commands = (tag, max) => {
@@ -417,8 +462,39 @@ function parseAnswer(text) {
       return [];
     }
   };
-  return { answer, diagram: diagram || null, ink: commands("ink", 12), edits: commands("edit", 80) };
+  const dm = text.match(/<draw>([\s\S]*?)<\/draw>/i);
+  return { answer, diagram: diagram || null, draw: dm ? drawItems(dm[1]) : null, ink: commands("ink", 12), edits: commands("edit", 80) };
 }
+
+/**
+ * <draw> is one JSON object per line (so it can stream). Also accepts a JSON
+ * array or {"items":[...]} in case the model writes it that way.
+ */
+function drawItems(src, { partial = false } = {}) {
+  let body = src.replace(/^\s*```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  const t = body.trim();
+  if (!partial && (t.startsWith("[") || t.startsWith('{"items"'))) {
+    try {
+      const v = JSON.parse(t);
+      return (Array.isArray(v) ? v : [{ ...v, items: undefined }, ...(v.items || [])]).filter((x) => x && typeof x === "object").slice(0, 60);
+    } catch {}
+  }
+  if (partial) body = body.slice(0, body.lastIndexOf("\n") + 1);
+  const out = [];
+  for (let line of body.split("\n")) {
+    line = line.trim().replace(/,$/, "");
+    if (!line.startsWith("{")) continue;
+    try {
+      const v = JSON.parse(line);
+      if (v && typeof v === "object") out.push(v);
+    } catch {}
+  }
+  return out.slice(0, 60);
+}
+
+const MODEL_RE = /^[a-z0-9][a-z0-9.\-_\[\]]{0,60}$/i;
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const EDIT_MODES = new Set(["auto", "ask", "off"]);
 
 function toolStatus(block) {
   const i = block.input || {};
@@ -444,8 +520,15 @@ async function handleAsk(req, res) {
   const contextB64 = png(image);
   const focusB64 = png(focusImage);
   const marksB64 = png(body.marksImage);
+  const extraFocusB64 = (Array.isArray(body.extraFocusImages) ? body.extraFocusImages : []).map(png).filter(Boolean).slice(0, 5);
   const regions = Array.isArray(body.regions) ? body.regions : [];
   if (!contextB64) return send(res, 400, { error: "image (PNG data URL) is required" });
+  // Per-ask choices from the UI. Empty = Claude Code's own default.
+  const model = MODEL_RE.test(body.model || "") ? body.model : CLAUDE_MODEL;
+  const effort = EFFORTS.has(body.effort) ? body.effort : "";
+  const editMode = EDIT_MODES.has(body.editMode) ? body.editMode : "auto";
+  // A comment thread: the reply goes into the thread instead of a card.
+  const thread = body.thread && Array.isArray(body.thread.messages) ? body.thread : null;
 
   let cwd = CLAUDE_CWD;
   if (body.cwd?.trim()) {
@@ -459,6 +542,12 @@ async function handleAsk(req, res) {
   await fsp.writeFile(path.join(dir, "board.png"), Buffer.from(contextB64, "base64"));
   if (focusB64) await fsp.writeFile(path.join(dir, "focus.png"), Buffer.from(focusB64, "base64"));
   if (marksB64) await fsp.writeFile(path.join(dir, "marks.png"), Buffer.from(marksB64, "base64"));
+  const extraFocusPaths = [];
+  for (const [i, b64] of extraFocusB64.entries()) {
+    const f = path.join(dir, `focus-${i + 2}.png`);
+    await fsp.writeFile(f, Buffer.from(b64, "base64"));
+    extraFocusPaths.push(f);
+  }
 
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   const emit = (ev) => !res.writableEnded && res.write(JSON.stringify(ev) + "\n");
@@ -475,11 +564,11 @@ async function handleAsk(req, res) {
     }
   });
 
-  const selectImages = [focusB64 && path.join(dir, "focus.png"), path.join(dir, "board.png")].filter(Boolean);
+  const selectImages = [focusB64 && path.join(dir, "focus.png"), ...extraFocusPaths, path.join(dir, "board.png")].filter(Boolean);
   const answerImages = [...selectImages, marksB64 && path.join(dir, "marks.png")].filter(Boolean);
   const started = Date.now();
-  const log = { id, scope, question, cwd, prior: prior.map((p) => p.id) };
-  console.log(`[ask ${id}] scope=${scope} prior=${prior.length} cwd=${cwd}`);
+  const log = { id, scope, question, cwd, model, effort, editMode, thread: !!thread, prior: prior.map((p) => p.id) };
+  console.log(`[ask ${id}] scope=${scope} prior=${prior.length} model=${model || "default"} effort=${effort || "default"} edits=${editMode}${thread ? " (comment)" : ""} cwd=${cwd}`);
   try {
     // ---- step 1: pick relevant earlier answers
     let selection = { relevant: prior.map((p) => p.id), followUpOf: null, reason: "few answers, all passed", cost: 0 };
@@ -511,21 +600,30 @@ async function handleAsk(req, res) {
     emit({ type: "context", ids: selection.relevant, followUpOf: selection.followUpOf });
 
     // ---- step 2: answer (continuing the followed-up answer's session when possible)
-    const parent = prior.find((p) => p.id === selection.followUpOf);
+    // A comment thread continues its own Claude session; a card continues the card it follows up.
+    const parent = thread?.sessionId
+      ? { sessionId: thread.sessionId, engine: thread.engine, cwd: thread.cwd }
+      : prior.find((p) => p.id === selection.followUpOf);
     const canResume = parent?.sessionId && (parent.engine || "claude") === "claude" && path.resolve(parent.cwd || CLAUDE_CWD) === cwd;
+    const promptArgs = {
+      hasFocus: !!focusB64, focusCount: 1 + extraFocusB64.length, summary, question, scope, earlier, cwd,
+      regions: marksB64 ? regions : [], editMode, thread,
+    };
     const answer = async (resume) => {
-      const prompt = buildPrompt({ hasFocus: !!focusB64, summary, question, scope, earlier, cwd, resumed: resume, regions: marksB64 ? regions : [] });
+      const prompt = buildPrompt({ ...promptArgs, resumed: resume });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
       const args = ["--add-dir", dir, "--plugin-dir", AGENT_PLUGIN_DIR];
-      if (CLAUDE_MODEL) args.push("--model", CLAUDE_MODEL);
+      if (model) args.push("--model", model);
+      if (effort) args.push("--effort", effort);
       if (resume) args.push("--resume", parent.sessionId, "--fork-session");
       args.push("--include-partial-messages");
       let text = "";
       let lastSent = "";
       let lastAt = 0;
       let lastDiagram = "";
+      let drawCount = 0;
       return runClaude({
-        content: [...imageBlocks(focusB64, contextB64, marksB64), { type: "text", text: prompt }],
+        content: [...imageBlocks(focusB64, contextB64, marksB64, extraFocusB64), { type: "text", text: prompt }],
         args,
         cwd,
         timeoutMs: CLAUDE_TIMEOUT_MS,
@@ -550,6 +648,15 @@ async function handleAsk(req, res) {
                 emit({ type: "diagram", mermaid: complete });
               }
             }
+            // ...and freeform drawings, one item per completed line.
+            const dr = text.match(/<draw>([\s\S]*?)(?:<\/draw>|$)/i);
+            if (dr) {
+              const items = drawItems(dr[1], { partial: !/<\/draw>/i.test(text) });
+              if (items.length > drawCount) {
+                drawCount = items.length;
+                emit({ type: "draw", items });
+              }
+            }
           } else if (ev.type === "assistant") {
             for (const b of ev.message?.content || []) if (b.type === "tool_use") emit({ type: "status", text: toolStatus(b) + "…" });
           }
@@ -557,7 +664,7 @@ async function handleAsk(req, res) {
       });
     };
     const answerWithCodex = async () => {
-      const prompt = buildPrompt({ hasFocus: !!focusB64, summary, question, scope, earlier, cwd, resumed: false, regions: marksB64 ? regions : [], engine: "codex" });
+      const prompt = buildPrompt({ ...promptArgs, resumed: false, engine: "codex" });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
       const r = await runCodex({
         prompt, images: answerImages, cwd, timeoutMs: CLAUDE_TIMEOUT_MS, onChild: track, workDir: dir,
@@ -570,7 +677,7 @@ async function handleAsk(req, res) {
 
     let result;
     if (claudeAvailable()) {
-      emit({ type: "status", text: canResume ? "Continuing that thread…" : "Answering…" });
+      emit({ type: "status", text: canResume ? "Continuing that thread…" : thread ? "Replying…" : "Answering…" });
       try {
         try {
           result = await answer(canResume);
@@ -596,6 +703,7 @@ async function handleAsk(req, res) {
       throw new Error(`Claude is out of budget until ${new Date(claudeBlockedUntil).toLocaleTimeString()} (${claudeBlockedReason})`);
     }
     const parsed = parseAnswer(result.result || "");
+    if (editMode === "off") parsed.edits = [];
     log.result = result;
     log.engine = result.engine;
     const costUsd = (result.total_cost_usd || 0) + (selection.cost || 0);
@@ -608,6 +716,11 @@ async function handleAsk(req, res) {
       costUsd,
       sessionId: result.session_id ?? null,
       engine: result.engine,
+      model: result.engine === "claude" ? model || null : CODEX_MODEL || null,
+      // the model that actually answered (the most expensive one in the run)
+      modelUsed: Object.entries(result.modelUsage || {}).sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0))[0]?.[0] || null,
+      effort: result.engine === "claude" ? effort || null : null,
+      editMode,
       cwd,
       contextIds: selection.relevant,
       followUpOf: selection.followUpOf,

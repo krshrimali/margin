@@ -371,9 +371,19 @@ export function renderInk({ commands, regions, elementsById, userStrokeSize, use
       } else if (act === "bracket") {
         const x = b.maxX + 16 * k;
         stroke(densify([[x - 9 * k, b.minY - 4 * k], [x, b.minY], [x, b.maxY], [x - 9 * k, b.maxY + 4 * k]], 3 * k, 0.5 * k, rnd));
+      } else if (act === "brace" || act === "curly") {
+        // a curly brace down the right side, tip pointing away from the content
+        const x = b.maxX + 12 * k, y0 = b.minY - 2 * k, y1 = b.maxY + 2 * k, ym = (y0 + y1) / 2;
+        const d = Math.min(12 * k, (y1 - y0) / 4);
+        stroke(densify([
+          ...quad([x, y0], [x + d, y0], [x + d, y0 + d], 8),
+          ...quad([x + d, ym - d], [x + d, ym], [x + 2 * d, ym], 8),
+          ...quad([x + 2 * d, ym], [x + d, ym], [x + d, ym + d], 8).slice(1),
+          ...quad([x + d, y1 - d], [x + d, y1], [x, y1], 8),
+        ], 2.5 * k, 0.4 * k, rnd));
       } else continue;
       if (label) {
-        const markOnly = ["check", "tick", "cross", "wrong", "bracket"].includes(act);
+        const markOnly = ["check", "tick", "cross", "wrong", "bracket", "brace", "curly"].includes(act);
         const drawn = out.slice(before);
         const key = Array.isArray(c.targets) ? `T:${c.targets.join(",")}` : keyOf(c.target);
         note(label, markOnly && drawn.length ? boundsOf(drawn) : b, !markOnly, key);
@@ -480,6 +490,8 @@ export function applyEdits({ commands, regions, elementsById }) {
             const patch = {};
             if (el.type === "text") {
               if (textColor) patch.strokeColor = textColor;
+            } else if (el.strokeColor === "transparent" && el.backgroundColor === "transparent") {
+              // an invisible label holder (custom shapes, the stick figure): keep it invisible
             } else {
               if (stroke) patch.strokeColor = stroke;
               if (FILLABLE.has(el.type)) {
@@ -517,6 +529,11 @@ export function applyEdits({ commands, regions, elementsById }) {
             } else set(t, retextFree(t, next));
           }
           done++;
+        } else if (act === "move" || act === "nudge") {
+          const dx = Math.max(-2000, Math.min(2000, Number(c.dx) || 0)), dy = Math.max(-2000, Math.min(2000, Number(c.dy) || 0));
+          if (!dx && !dy) throw new Error("no dx/dy");
+          for (const el of members) set(el, { x: el.x + dx, y: el.y + dy });
+          done++;
         } else if (act === "delete" || act === "remove") {
           for (const el of members) set(el, { isDeleted: true });
           done++;
@@ -530,6 +547,28 @@ export function applyEdits({ commands, regions, elementsById }) {
     }
   }
   return { changed, done, skipped };
+}
+
+/** Short human descriptions of edit commands, for the "apply these edits?" panel. */
+export function describeEdits(commands, regions) {
+  const name = (id) => {
+    const r = regions.find((r) => r.id === String(id || "").trim().toUpperCase());
+    if (!r) return String(id);
+    return r.label ? `“${r.label.slice(0, 28)}${r.label.length > 28 ? "…" : ""}”` : `${r.id} (${r.kind.replace("your diagram: ", "")})`;
+  };
+  return (commands || []).slice(0, 80).map((c) => {
+    const act = String(c.do || c.action || "").toLowerCase();
+    const targets = (Array.isArray(c.targets) ? c.targets : [c.target]).filter(Boolean);
+    const who = targets.length > 3 ? `${targets.slice(0, 3).map(name).join(", ")} +${targets.length - 3}` : targets.map(name).join(", ");
+    if (["style", "color", "colour", "recolor", "recolour"].includes(act)) {
+      const bits = [c.fill && `fill ${c.fill}`, (c.stroke || c.color) && `stroke ${c.stroke || c.color}`, c.textColor && `text ${c.textColor}`, c.strokeStyle, c.strokeWidth && `width ${c.strokeWidth}`].filter(Boolean);
+      return { kind: "style", text: `Restyle ${who}`, detail: bits.join(", "), swatches: [c.fill, c.stroke || c.color, c.textColor].filter((x) => typeof x === "string" && x.startsWith("#")) };
+    }
+    if (["relabel", "retext", "rename", "replace"].includes(act)) return { kind: "text", text: `Rename ${who}`, detail: `${c.from ? `“${c.from}” → ` : "→ "}“${c.text ?? c.to ?? ""}”` };
+    if (act === "move" || act === "nudge") return { kind: "move", text: `Move ${who}`, detail: `${c.dx || 0}, ${c.dy || 0}` };
+    if (act === "delete" || act === "remove") return { kind: "delete", text: `Delete ${who}`, detail: "" };
+    return { kind: "other", text: `${act} ${who}`, detail: "" };
+  });
 }
 
 // ------------------------------------------------------------ layer -----
