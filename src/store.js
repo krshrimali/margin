@@ -1,5 +1,5 @@
 // Tiny observable stores shared by the overlay UI (comments, picked context, preferences).
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 export function createStore(initial) {
   let state = initial;
@@ -67,4 +67,44 @@ export function updateThread(id, fn) {
 }
 export function updateMessage(threadId, msgId, patch) {
   updateThread(threadId, (t) => ({ ...t, messages: t.messages.map((m) => (m.id === msgId ? { ...m, ...patch } : m)) }));
+}
+
+/**
+ * Popovers and panels close when the user presses anywhere outside them (the board, the toolbar, another
+ * panel) and when another popover opens, so only one is up at a time.
+ *   name   – this popover's name (announced to the others when it opens)
+ *   ref    – the popover's root element; presses inside it don't count
+ *   keep   – selectors whose presses don't count either (e.g. the button that toggles it)
+ *   allow  – names of popovers that may stay open alongside this one
+ *   guard  – return false to stay open on an outside press (e.g. an unsent draft)
+ */
+export function useDismiss(name, open, close, { ref, keep = [], allow = [], guard } = {}) {
+  const latest = useRef({});
+  latest.current = { close, keep, allow, guard, ref };
+  useEffect(() => {
+    if (!open) return;
+    window.dispatchEvent(new CustomEvent("wb-popover", { detail: { name, el: ref?.current || null } }));
+    const onOther = (e) => {
+      const { close, allow, ref } = latest.current;
+      const { name: other, el } = e.detail || {};
+      if (other === name || allow.includes(other)) return;
+      if (el && ref?.current?.contains(el)) return; // a menu inside this popover
+      close();
+    };
+    const onDown = (e) => {
+      const { close, keep, guard, ref } = latest.current;
+      const t = e.target;
+      if (!(t instanceof Element)) return;
+      if (ref?.current?.contains(t)) return;
+      if (keep.some((sel) => t.closest(sel))) return;
+      if (guard && guard() === false) return;
+      close();
+    };
+    window.addEventListener("wb-popover", onOther);
+    window.addEventListener("pointerdown", onDown, true);
+    return () => {
+      window.removeEventListener("wb-popover", onOther);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+  }, [open, name]);
 }

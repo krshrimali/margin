@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useDismiss } from "./store.js";
 import { PenIcon } from "./icons.jsx";
 import { EASINGS, PALETTE, PRESETS, nibPressures, outlinePath, penDescriptor } from "./pens.js";
 
@@ -39,6 +40,8 @@ function Slider({ label, value, min, max, step = 1, onChange, suffix = "" }) {
 export default function PenDock({ settings, penId, active, onPick, onChange, stylusOnly, setStylusOnly, onReset }) {
   const [open, setOpen] = useState(false);
   const [advanced, setAdvanced] = useState(false);
+  const panelRef = useRef(null);
+  useDismiss("pens", open, () => setOpen(false), { ref: panelRef, keep: [".pen-buttons"] });
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("whiteboard.dock.collapsed") === "1");
   const toggleCollapsed = () => {
     setCollapsed((c) => {
@@ -76,7 +79,7 @@ export default function PenDock({ settings, penId, active, onPick, onChange, sty
       </div>
 
       {open && (
-        <div className="pen-panel">
+        <div className="pen-panel" ref={panelRef}>
           <div className="pen-panel-title">
             <span className="title-l"><PenIcon id={penId} size={16} /> {pen.label}</span>
             <button className="link" onClick={() => onReset(penId)} title="Reset this pen to defaults">reset</button>

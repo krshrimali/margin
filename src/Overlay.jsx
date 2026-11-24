@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCommonBounds, getSceneVersion } from "@excalidraw/excalidraw";
 import { askClaude, cancelAsk, onRunningChange, MODELS, EFFORTS, EDIT_MODES, onProposalsChange, applyProposal, discardProposal, previewProposal, proposalTargets, resolveProposal } from "./claude.js";
-import { comments, picks, prefs, ui, rid, updateThread, updateMessage, useStore, LS, takeAskPrefs } from "./store.js";
+import { comments, picks, prefs, ui, rid, updateThread, updateMessage, useStore, useDismiss, LS, takeAskPrefs } from "./store.js";
 import { player, startWalkthrough, goToStep, endWalkthrough, hasSteps } from "./steps.js";
 import { exportToBlob } from "@excalidraw/excalidraw";
 
@@ -315,6 +315,8 @@ export function SelectionBar({ api, view, board, onAsk }) {
   const [regen, setRegen] = useState(false);
   const selKey = view?.sel.join(",");
   useEffect(() => { setAsking(false); setRegen(false); }, [selKey]);
+  const barRef = useRef(null);
+  useDismiss("sel-ask", asking, () => setAsking(false), { ref: barRef, guard: () => !barRef.current?.querySelector("textarea")?.value.trim() });
   // Alt+A / command bar: open the ask box for the current selection
   const lastSelAsk = useRef(u.selAsk);
   useEffect(() => {
@@ -348,7 +350,7 @@ export function SelectionBar({ api, view, board, onAsk }) {
     else picks.set((l) => [...l, { id: rid(), elementIds: ids, label: describe(selected) }]);
   };
   return (
-    <div className={`sel-bar ${asking ? "asking" : ""}`} style={{ left, top }} onPointerDown={(e) => e.stopPropagation()}>
+    <div ref={barRef} className={`sel-bar ${asking ? "asking" : ""}`} style={{ left, top }} onPointerDown={(e) => e.stopPropagation()}>
       {!asking ? (
         <>
           <button onClick={comment} title="Comment on the selection (Alt+C)"><span className="ic">💬</span> Comment</button>
@@ -417,6 +419,8 @@ export function ContextTray({ api, view, onAsk }) {
   const list = useStore(picks);
   const [asking, setAsking] = useState(false);
   useEffect(() => { if (!list.length) setAsking(false); }, [list.length]);
+  const trayRef = useRef(null);
+  useDismiss("tray-ask", asking, () => setAsking(false), { ref: trayRef, guard: () => !trayRef.current?.querySelector("textarea")?.value.trim() });
   if (!list.length) return null;
   const goto = (p) => {
     const els = withFamily(p.elementIds, api.getSceneElements());
@@ -424,7 +428,7 @@ export function ContextTray({ api, view, onAsk }) {
   };
   const allIds = list.flatMap((p) => p.elementIds);
   return (
-    <div className="context-tray" onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+    <div className="context-tray" ref={trayRef} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
       <div className="tray-head">
         <b>Context</b>
         <span className="muted">{list.length} pick{list.length > 1 ? "s" : ""} · Claude sees them together</span>
@@ -620,6 +624,12 @@ export function ThreadPopover({ api, view, board }) {
   useLayoutEffect(() => {
     if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
   }, [t?.messages.length, t?.messages[t?.messages.length - 1]?.text]);
+  const threadRef = useRef(null);
+  // clicking elsewhere closes the thread, unless a reply is being typed in it
+  useDismiss("thread", !!t, close, {
+    ref: threadRef, keep: [".pin", ".comments-panel"], allow: ["panel"],
+    guard: () => !threadRef.current?.querySelector("textarea")?.value.trim(),
+  });
   useEffect(() => {
     if (!t) return;
     const onKey = (e) => { if (e.key === "Escape") close(); };
@@ -629,7 +639,8 @@ export function ThreadPopover({ api, view, board }) {
   if (!t || !view) return null;
   const { box } = threadBox(view, t);
   const W = 360;
-  let left = box.x1 + 22;
+  // start right of the thread's pin (box.x1 + 8, up to ~44 px wide with a count) so the pin stays clickable
+  let left = box.x1 + 60;
   if (left + W > window.innerWidth - 70) left = Math.max(8, box.x0 - W - 22);
   const top = Math.max(60, Math.min(window.innerHeight - 460, box.y0 - 20));
   const pending = t.messages.find((m) => m.pending);
@@ -641,7 +652,7 @@ export function ThreadPopover({ api, view, board }) {
     }
   };
   return (
-    <div className="thread" style={{ left, top, width: W, maxHeight: Math.max(300, window.innerHeight - top - 16) }} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+    <div className="thread" ref={threadRef} style={{ left, top, width: W, maxHeight: Math.max(300, window.innerHeight - top - 16) }} onPointerDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
       <div className="thread-head">
         <button className="thread-target" onClick={goto} title="Show on the board">💬 {t.label}</button>
         <div className="thread-tools">
@@ -681,6 +692,8 @@ export function ThreadPopover({ api, view, board }) {
 export function CommentsPanel({ api }) {
   const list = useStore(comments);
   const u = useStore(ui);
+  const panelRef = useRef(null);
+  useDismiss("panel", u.panel, () => ui.set((s) => ({ ...s, panel: false })), { ref: panelRef, keep: [".comments-btn", ".thread", ".pin"], allow: ["thread"] });
   if (!u.panel) return null;
   const open = list.filter((t) => t.messages.length && !t.resolved);
   const resolved = list.filter((t) => t.messages.length && t.resolved);
@@ -691,7 +704,7 @@ export function CommentsPanel({ api }) {
     ui.set((s) => ({ ...s, openThread: t.id }));
   };
   return (
-    <div className="comments-panel" onPointerDown={(e) => e.stopPropagation()}>
+    <div className="comments-panel" ref={panelRef} onPointerDown={(e) => e.stopPropagation()}>
       <div className="panel-head">
         <b>Comments</b>
         <label className="muted small"><input type="checkbox" checked={u.showResolved} onChange={(e) => ui.set((s) => ({ ...s, showResolved: e.target.checked }))} /> resolved ({resolved.length})</label>
@@ -766,6 +779,8 @@ function threadElements(api, t) {
 
 function ExportMenu({ api, t }) {
   const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useDismiss("export", open, () => setOpen(false), { ref: wrapRef });
   const copy = async () => {
     await navigator.clipboard.writeText(threadMarkdown(t)).catch(() => {});
     api.setToast({ message: "Thread copied as Markdown.", duration: 2000 });
@@ -784,7 +799,7 @@ function ExportMenu({ api, t }) {
     }
   };
   return (
-    <span className="export-wrap">
+    <span className="export-wrap" ref={wrapRef}>
       <button title="Export this thread" onClick={() => setOpen((o) => !o)}>⤓</button>
       {open && (
         <div className="menu" onMouseLeave={() => setOpen(false)}>
@@ -926,11 +941,13 @@ export function CommandBar({ api, onAsk, onToggleInk }) {
   const askItem = { label: `✦ Ask Claude: “${q.trim()}”`, hint: matches.length ? "" : "Enter", run: () => onAsk({ scope: "auto", question: q.trim(), ...takeAskPrefs(), picks: picks.get().flatMap((x) => x.elementIds) }) };
   const items = q.trim() ? [...matches, askItem] : matches;
   useEffect(() => setI(0), [q]);
+  const palRef = useRef(null);
+  useDismiss("palette", u.palette, close, { ref: palRef });
   if (!u.palette) return null;
   const run = (c) => { close(); c?.run(); };
   return (
     <div className="palette-back" onPointerDown={(e) => { if (e.target === e.currentTarget) close(); }}>
-      <div className="palette" onKeyDown={(e) => e.stopPropagation()}>
+      <div className="palette" ref={palRef} onKeyDown={(e) => e.stopPropagation()}>
         <input
           autoFocus
           placeholder="Type a command, or a question for Claude…"

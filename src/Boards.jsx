@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useDismiss } from "./store.js";
 
 const ago = (t) => {
   const s = Math.round((Date.now() - t) / 1000);
@@ -35,14 +36,7 @@ export default function Boards({ board, status, onOpen, openSignal }) {
   const refresh = () => api.list().then(setBoards).catch(() => {});
   useEffect(() => { refresh(); }, [status === "saved"]);
   useEffect(() => { if (openSignal) { setOpen(true); refresh(); } }, [openSignal]);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e) => {
-      if (panelRef.current && !panelRef.current.contains(e.target) && !e.target.closest(".board-pill")) setOpen(false);
-    };
-    window.addEventListener("pointerdown", close, true);
-    return () => window.removeEventListener("pointerdown", close, true);
-  }, [open]);
+  useDismiss("boards", open, () => setOpen(false), { ref: panelRef, keep: [".board-pill"] });
 
   const current = boards.find((b) => b.id === board);
   const title = current?.title || (board === "default" ? "My board" : board);

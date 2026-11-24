@@ -7,7 +7,7 @@ import { PRESETS, loadPenSettings, savePenSettings } from "./pens.js";
 import { clearInk, inkState, setInkHidden } from "./ink.js";
 import Boards from "./Boards.jsx";
 import { SCOPES, SCOPE_HINTS, askClaude, cancelAsk, onRunningChange } from "./claude.js";
-import { LS, comments, picks, prefs, ui, useStore, takeAskPrefs } from "./store.js";
+import { LS, comments, picks, prefs, ui, useStore, takeAskPrefs, useDismiss } from "./store.js";
 import {
   AskOptions, Attachments, CommandBar, CommentPins, CommentsPanel, ContextTray, PickHighlights, ProposalsPanel, SelectionBar, StepPlayer, ThreadPopover,
   useCommentCount, useOverlayShortcuts, useView,
@@ -60,6 +60,8 @@ function ClaudeControls({ api }) {
   const commentCount = useCommentCount();
   const u = useStore(ui);
   const [open, setOpen] = useState(false);
+  const popRef = useRef(null);
+  useDismiss("ask", open, () => setOpen(false), { ref: popRef, keep: [".claude-caret"] });
   const [question, setQuestion] = useState("");
   const [defaultScope, setDefaultScope] = useState(() => LS.get("whiteboard.claude.scope.v2", "auto"));
   const [scope, setScope] = useState(defaultScope);
@@ -164,7 +166,7 @@ function ClaudeControls({ api }) {
       )}
 
       {open && (
-        <div className="claude-pop" onKeyDown={(e) => e.stopPropagation()}>
+        <div className="claude-pop" ref={popRef} onKeyDown={(e) => e.stopPropagation()}>
           <textarea
             autoFocus
             placeholder="Optional. You can also just write on the board. Try “research X online and draw a flowchart”, “explain this”, “make it colourful”."
