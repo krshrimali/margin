@@ -228,7 +228,7 @@ const boxOf = (s) => ({ minX: s.x, minY: s.y, maxX: s.x + s.width, maxY: s.y + s
 const union = (a, b) => ({ minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) });
 
 /** Where the line from the centre of box b towards (tx, ty) leaves it (plus a gap). */
-function exitPoint(b, tx, ty, gap = 6, ellipse = false) {
+export function exitPoint(b, tx, ty, gap = 6, ellipse = false) {
   const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
   const dx = tx - cx, dy = ty - cy;
   const hw = (b.maxX - b.minX) / 2, hh = (b.maxY - b.minY) / 2;
@@ -312,7 +312,10 @@ function wrapText(text, width) {
  * Build a drawing from <draw> items.
  *   items: [{title?, style?}, {id, shape, text, at, ...}, ...]
  *   prefix: unique id prefix (stable across streaming rebuilds)
- * Returns { elements, steps } — steps[i] are the element ids of item i, in drawing order (for animation).
+ * Returns { elements, steps, stepOf, narration }:
+ *   steps[i]  – element ids of item i, in drawing order (for the streaming animation)
+ *   stepOf    – element id -> walkthrough step (0 = always shown), from {"step":n,"say":"…"} marker lines
+ *   narration – [{ step, say }] in order
  */
 export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   const opts = items.find((i) => i && !i.shape && (i.style || i.title)) || {};
@@ -324,6 +327,9 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   const front = []; // [skeleton, step]
   const back = []; // groups and frames go behind everything
   const steps = [];
+  const elStep = new Map(); // skeleton id -> walkthrough step
+  const narration = [];
+  let currentStep = 0;
   let n = 0;
   const nid = (k) => `${prefix}-${k}-${n++}`;
 
@@ -361,7 +367,15 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   };
 
   for (const raw of items) {
-    if (!raw || typeof raw !== "object" || !raw.shape) continue;
+    if (!raw || typeof raw !== "object") continue;
+    if (!raw.shape) {
+      // {"step":2,"say":"…"}: everything after this belongs to step 2
+      if (raw.step != null && raw.step !== false) {
+        currentStep = Number(raw.step) > 0 ? Number(raw.step) : narration.length + 1;
+        narration.push({ step: currentStep, say: String(raw.say ?? raw.text ?? raw.note ?? "").trim() });
+      }
+      continue;
+    }
     let shape = String(raw.shape).toLowerCase().trim();
     shape = ALIASES[shape] || shape;
     const item = { ...raw, shape };
@@ -369,6 +383,7 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
     steps.push(step);
     const push = (skel, where = front) => {
       skel.id ||= nid(shape);
+      elStep.set(skel.id, currentStep);
       where.push([skel, steps.length - 1]);
       step.push(skel.id);
       return skel.id;
@@ -627,14 +642,16 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   const groupsOf = new Map(elements.map((e) => [e.id, e.groupIds]));
   elements = elements.map((e) => (e.containerId && !e.groupIds?.length && groupsOf.get(e.containerId)?.length ? { ...e, groupIds: [...groupsOf.get(e.containerId)] } : e));
   // map bound texts (created by the converter for labels) to their container's step
-  const stepOf = new Map();
-  skels.forEach(([s, i]) => stepOf.set(s.id, i));
+  const itemOf = new Map();
+  skels.forEach(([s, i]) => itemOf.set(s.id, i));
   const ordered = steps.map(() => []);
   for (const el of elements) {
-    const i = stepOf.get(el.id) ?? stepOf.get(el.containerId);
+    const i = itemOf.get(el.id) ?? itemOf.get(el.containerId);
     (ordered[i] || (ordered[i] = [])).push(el.id);
   }
-  return { elements, steps: ordered.filter((s) => s && s.length) };
+  const stepOf = {};
+  if (narration.length) for (const el of elements) stepOf[el.id] = elStep.get(el.id) ?? elStep.get(el.containerId) ?? 0;
+  return { elements, steps: ordered.filter((s) => s && s.length), stepOf, narration };
 }
 
 /**

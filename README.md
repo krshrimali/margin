@@ -86,6 +86,31 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   item while Claude writes them: lines draw themselves and shapes fade in.
 - **Research.** Ask "research X online and then draw a flowchart / explain it" and Claude searches the web, reads
   a few sources, answers with a `Sources:` line and draws what it found.
+- **Changing diagrams in place.** Claude can add a shape (also *between* two connected shapes, re-routing the
+  arrow through it), add or remove arrows, besides recolouring, renaming, moving and deleting. New arrows bend
+  around shapes in their way and match the existing arrows' colour.
+- **Regenerate.** Select one of Claude's cards and press **↻ Regenerate** to ask the same question again (same focus,
+  without the old answer), e.g. with another model or effort; the new card lands beside the old one, its header
+  says which model answered. In a comment thread, **↻** on a reply asks again and adds the new reply below.
+- **Walk me through it.** Tick *▶ Walk me through it, step by step* (one ask only) or just ask Claude to explain step
+  by step: it draws the explanation in steps and a player at the bottom plays them one at a time with Claude's
+  narration (**Next ▶** / **◀ Back**, or → ← and Space with nothing selected; Esc or *Show all* ends it). Saved
+  boards always contain every step; *▶ Play steps* on a selected walkthrough (or the command bar) replays it.
+- **Attachments.** Every ask box has **📎 File** (PDFs, images, text, code; up to 8 files of 15 MB) and **🔗 Link**;
+  you can also drop files or links onto the box. Files are saved with the ask (`data/asks/<id>/attachments/`)
+  and Claude reads them; links are fetched with WebFetch. E.g. attach a paper and ask "diagram this".
+- **Suggestions in comments.** With edits on *Ask first*, edits Claude proposes from a comment appear inside the
+  thread, each with ✓ / ✕, plus *Preview*, *Accept all* and *Reject all*. Edits from ordinary asks appear in the
+  same form in a panel at the bottom left.
+- **Command bar (Alt+K).** Type to run anything: ask (whatever doesn't match a command is sent to Claude as a
+  question), comment, pick, open comments, toggle ink, play a walkthrough, switch model / effort / edits / cost
+  cap, open boards. **Alt+A** opens the ask box for the selection.
+- **Live cost and a cap.** While Claude works, the status row shows input↑ / output↓ tokens and the time; cards and
+  comment replies show the final cost. **Cap $** (remembered) stops an answer that would cost more
+  (`--max-budget-usd`); a stopped answer says so.
+- **Export a thread.** ⤓ in a thread copies it as Markdown or downloads Markdown plus a PNG of the commented
+  elements and everything Claude drew from the thread.
+- **Picked context is saved** with the board, like comments.
 - **Edits.** When you ask for existing content to change ("make it colourful", "rename X to Y", "fix the typo",
   "update your diagram", "remove that box"), Claude edits the regions in place instead of telling you how: it
   recolours fills, strokes, ink and text, retypes typed text and labels (boxes grow to fit), or removes regions.

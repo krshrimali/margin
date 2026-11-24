@@ -7,11 +7,12 @@ import { PRESETS, loadPenSettings, savePenSettings } from "./pens.js";
 import { clearInk, inkState, setInkHidden } from "./ink.js";
 import Boards from "./Boards.jsx";
 import { SCOPES, SCOPE_HINTS, askClaude, cancelAsk, onRunningChange } from "./claude.js";
-import { LS, comments, picks, prefs, ui, useStore } from "./store.js";
+import { LS, comments, picks, prefs, ui, useStore, takeAskPrefs } from "./store.js";
 import {
-  AskOptions, CommentPins, CommentsPanel, ContextTray, PickHighlights, ProposalsPanel, SelectionBar, ThreadPopover,
+  AskOptions, Attachments, CommandBar, CommentPins, CommentsPanel, ContextTray, PickHighlights, ProposalsPanel, SelectionBar, StepPlayer, ThreadPopover,
   useCommentCount, useOverlayShortcuts, useView,
 } from "./Overlay.jsx";
+import { withAllSteps } from "./steps.js";
 // The open board: ?board=<id>, else the last one you had open, else "default".
 const BOARD = new URLSearchParams(location.search).get("board") || LS.get("whiteboard.lastBoard", "default");
 LS.set("whiteboard.lastBoard", BOARD);
@@ -27,6 +28,8 @@ const loadBoard = async () => {
     if (!r.ok) return { appState: { currentItemRoughness: 0 }, scrollToContent: true };
     const data = await r.json();
     // comment threads are saved alongside the elements
+    // picked context is saved per board too
+    picks.set(Array.isArray(data.picks) ? data.picks : []);
     comments.set(Array.isArray(data.comments) ? data.comments.map((t) => ({ ...t, messages: (t.messages || []).map((m) => (m.pending ? { ...m, pending: false, error: m.text ? undefined : "Interrupted (the page was reloaded)." } : m)) })) : []);
     return { ...data, scrollToContent: true };
   } catch {
@@ -49,6 +52,7 @@ function useRunning() {
 
 const SCOPE_SHORT = { selection: "Selection", new: "New ink", viewport: "Page", board: "Board", picks: "Picked", comment: "Comment" };
 
+const fmtK = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n || 0));
 const EDIT_HINT = "Auto lets Claude change your content when you ask for a change; Ask first shows a preview to apply or discard; Off only marks up.";
 
 function ClaudeControls({ api }) {
@@ -89,14 +93,24 @@ function ClaudeControls({ api }) {
     fetch("/api/health").then((r) => r.json()).then((h) => setDefaultCwd(h.claudeCwd)).catch(() => {});
   }, []);
 
+  const [files, setFiles] = useState([]);
+  const [links, setLinks] = useState([]);
   const run = useCallback(
-    (s, q) => {
+    (s, q, extras = {}) => {
       if (!api) return;
-      const p = prefs.get();
-      askClaude(api, { scope: s, question: q, cwd, model: p.model, effort: p.effort, editMode: p.editMode, picks: picks.get().flatMap((x) => x.elementIds) }).catch((e) => console.error(e));
+      askClaude(api, { scope: s, question: q, cwd, ...takeAskPrefs(), ...extras, picks: picks.get().flatMap((x) => x.elementIds) }).catch((e) => console.error(e));
     },
     [api, cwd],
   );
+  // the command bar can open this popover
+  const askOpenSeen = useRef(u.askOpen);
+  useEffect(() => {
+    if (u.askOpen !== askOpenSeen.current) {
+      askOpenSeen.current = u.askOpen;
+      setScope(defaultScope);
+      setOpen(true);
+    }
+  }, [u.askOpen, defaultScope]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -111,8 +125,10 @@ function ClaudeControls({ api }) {
 
   const submit = () => {
     setOpen(false);
-    run(scope, question);
+    run(scope, question, { attachments: files, links });
     setQuestion("");
+    setFiles([]);
+    setLinks([]);
   };
 
   return (
@@ -134,6 +150,12 @@ function ClaudeControls({ api }) {
             <div key={r.id} className="run-row">
               <span className="spinner dark" />
               <span className="run-status" title={`${r.status}${r.choice ? ` (${r.choice})` : ""}`}>{SCOPE_SHORT[r.scope] || r.scope} · {r.status || "Working…"}</span>
+              {r.tokens && (
+                <span className="run-tokens" title={`${r.tokens.input} input tokens (incl. cache), ${r.tokens.output} output tokens so far${r.maxBudget ? ` · capped at $${r.maxBudget.toFixed(2)}` : ""}`}>
+                  {fmtK(r.tokens.input)}↑ {fmtK(r.tokens.output)}↓
+                </span>
+              )}
+              {r.maxBudget > 0 && <span className="run-cap" title="Cost cap for this answer">≤${r.maxBudget.toFixed(2)}</span>}
               <span className="run-time">{Math.round((Date.now() - r.startedAt) / 1000)}s</span>
               <button className="run-cancel" title="Cancel" onClick={() => cancelAsk(r.id)}>✕</button>
             </div>
@@ -160,6 +182,7 @@ function ClaudeControls({ api }) {
               </label>
             ))}
           </div>
+          <Attachments files={files} setFiles={setFiles} links={links} setLinks={setLinks} />
           <p className="hint">{SCOPE_HINTS[scope]}{pickList.length > 0 && (scope === "auto" || scope === "selection") ? ` You have ${pickList.length} picked item${pickList.length > 1 ? "s" : ""}: Auto uses them.` : ""}</p>
           <AskOptions />
           <p className="hint">Model and effort apply to each answer; Default uses Claude Code's own default. Edits: {EDIT_HINT}</p>
@@ -239,9 +262,10 @@ export default function App() {
 
   const save = useCallback(async () => {
     if (!api) return;
-    const elements = api.getSceneElements().filter((e) => !e.customData?.claudePending);
+    // a walkthrough being played hides later steps; the file always has everything visible
+    const elements = withAllSteps(api.getSceneElements().filter((e) => !e.customData?.claudePending));
     const scene = JSON.parse(serializeAsJSON(elements, api.getAppState(), api.getFiles(), "local"));
-    const body = JSON.stringify({ ...scene, comments: comments.get().filter((t) => t.messages.length) });
+    const body = JSON.stringify({ ...scene, comments: comments.get().filter((t) => t.messages.length), picks: picks.get() });
     setSaveStatus("saving");
     try {
       const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body, keepalive: body.length < 60000 });
@@ -308,11 +332,13 @@ export default function App() {
 
   // comments are part of the board file: save when they change
   useEffect(() => {
-    return comments.subscribe(() => {
+    const later = () => {
       clearTimeout(saveRef.current.timer);
       setSaveStatus("unsaved");
       saveRef.current.timer = setTimeout(() => { saveRef.current.timer = 0; save(); }, 800);
-    });
+    };
+    const unsubs = [comments.subscribe(later), picks.subscribe(later)];
+    return () => unsubs.forEach((stop) => stop());
   }, [save]);
 
   const view = useView(api);
@@ -372,6 +398,13 @@ export default function App() {
       {api && <CommentsPanel api={api} />}
       {api && <ContextTray api={api} view={view} onAsk={ask} />}
       <ProposalsPanel api={api} />
+      <StepPlayer api={api} />
+      <CommandBar api={api} onAsk={ask} onToggleInk={() => {
+        if (!api) return;
+        const st = inkState(api);
+        if (!st.count) return api.setToast({ message: "Claude hasn't drawn anything yet.", duration: 2000 });
+        setInkHidden(api, !st.hidden);
+      }} />
       <PenDock
         settings={penSettings}
         penId={penId}

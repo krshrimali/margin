@@ -205,12 +205,54 @@ Syntax traps: `end` is reserved as a node id (use `Done`); ids starting with `o`
 edge heads; quote labels with punctuation `A["Retry (3x)"]`; no markdown or HTML in labels; close every
 `alt`/`loop` in sequence diagrams. Font is always Excalifont 16px.
 
-## 6. Write labels in the user's words
+## 6. Walkthroughs (step by step)
+
+When the user asks to explain step by step, walk through, teach, or "animate" a process (or the request says
+STEP-BY-STEP), split a `<draw>` into steps. A marker line starts a step; everything after it belongs to that
+step; items before the first marker (the title, a legend) are always shown:
+
+```
+<draw>
+{"title":"What happens when you type a URL"}
+{"step":1,"say":"The browser checks its cache, then asks a DNS resolver for the IP."}
+{"id":"b","shape":"person","text":"Browser","at":[0,1]}
+{"id":"r","shape":"rounded","text":"DNS resolver","at":[1,1],"color":"blue"}
+{"shape":"arrow","from":"b","to":"r","label":"example.com?"}
+{"step":2,"say":"With the IP, the browser opens a TCP + TLS connection to the server."}
+{"id":"s","shape":"cloud","text":"Web server","at":[2,1],"color":"teal"}
+{"shape":"arrow","from":"b","to":"s","label":"TLS handshake","route":"curve"}
+{"step":3,"say":"The server returns HTML; the browser parses it and fetches CSS, JS and images."}
+{"id":"h","shape":"document","text":"HTML","at":[2,2]}
+{"shape":"arrow","from":"s","to":"h"}
+</draw>
+```
+
+The user plays it one step at a time and reads your `say` line under the board, so: 3–7 steps, one idea per
+step, 1–2 plain sentences per `say` that explain *why*, not just what appears. Lay the final picture out as a
+whole first (all steps visible must still read well), then cut it into steps in reading order. Keep the card to
+a short summary: the narration carries the explanation.
+
+## 7. Changing an existing diagram (instead of redrawing)
+
+To change the structure of a diagram already on the board — the user's or your own — use edit commands on its
+labelled regions rather than drawing a new one (when edits are allowed):
+
+- insert a step: `{"do":"add","shape":"cylinder","text":"Redis cache","between":["D2","D3"],"color":"teal"}` —
+  placed between them, and the arrow between them is re-routed through it (keeping its label);
+- add beside: `{"do":"add","shape":"document","text":"Audit log","near":"D5","side":"below","from":"D5","label":"writes"}`;
+- connect / disconnect: `{"do":"connect","from":"D2","to":"R4","label":"retry","dashed":true}`,
+  `{"do":"disconnect","from":"D2","to":"D3"}`;
+- plus `style`, `relabel`, `move`, `delete` for everything else.
+
+New arrows bend around shapes in their way and match the colour of existing arrows. Redraw from scratch only when
+most of the diagram changes.
+
+## 8. Write labels in the user's words
 
 Labels are saved with the drawing, and a context picker later uses them to find which earlier drawing the user is
 pointing at. Use the user's own terms from the board ("Ingest", "Ranker", "Kafka"), not "Service A".
 
-## 7. Checklist before you emit
+## 9. Checklist before you emit
 
 1. Is a picture better than words or ink here? `<diagram>` or `<draw>`?
 2. Title states the idea. 5–12 shapes. One bold focal item.

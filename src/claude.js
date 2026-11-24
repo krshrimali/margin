@@ -10,6 +10,7 @@ import {
 } from "@excalidraw/excalidraw";
 import { regionsFor, markElements, renderInk, applyEdits, describeEdits, INK_COLOR } from "./ink.js";
 import { buildDrawing, outlineSkeletons } from "./draw.js";
+import { startWalkthrough } from "./steps.js";
 
 export const SCOPES = {
   auto: "Auto",
@@ -159,8 +160,9 @@ const WHOLE_BOARD_RE = /\b(whole|entire|full) (board|page|canvas)\b|\beverything
  *   focus       – what Claude should respond to (picked items, selection or new ink); may be empty
  *   focusGroups – focus split into clusters, one focus image each (picked items can be far apart)
  */
-function selectTargets(api, scope, { picks = [], question = "", threadIds = null } = {}) {
-  const all = live(api).filter((e) => !isPending(e));
+function selectTargets(api, scope, { picks = [], question = "", threadIds = null, excludeAsk = null } = {}) {
+  // a regenerate leaves the answer it replaces out of everything Claude sees
+  const all = live(api).filter((e) => !isPending(e) && !(excludeAsk && e.customData?.askId === excludeAsk));
   const appState = api.getAppState();
   const selected = all.filter((e) => appState.selectedElementIds?.[e.id]);
   const visible = () => elementsOverlappingBBox({ elements: all, bounds: getVisibleSceneBounds(appState), type: "overlap" });
@@ -648,8 +650,17 @@ export const onProposalsChange = (fn) => {
   return () => proposalListeners.delete(fn);
 };
 
-function computeEdits(api, p) {
-  return applyEdits({ commands: p.commands, regions: p.regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
+/** Apply a set of edit results to the scene (changed elements + newly added ones). */
+function commitEdits(api, { changed, added = [] }, capture) {
+  api.updateScene({
+    elements: [...api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e), ...added],
+    captureUpdate: capture,
+  });
+}
+
+const pendingIdx = (p) => p.state.map((s, i) => (s === "pending" ? i : -1)).filter((i) => i >= 0);
+function computeEdits(api, p, indices = pendingIdx(p)) {
+  return applyEdits({ commands: indices.map((i) => p.commands[i]), regions: p.regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
 }
 
 /** Show (or hide) a proposal on the board without recording it in undo history. */
@@ -657,36 +668,46 @@ export function previewProposal(api, id, on) {
   const p = proposals.get(id);
   if (!p) return;
   if (on && !p.preview) {
-    const { changed } = computeEdits(api, p);
+    const res = computeEdits(api, p);
     const before = new Map();
-    for (const e of api.getSceneElementsIncludingDeleted()) if (changed.has(e.id)) before.set(e.id, e);
-    p.preview = before;
-    api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e), captureUpdate: CaptureUpdateAction.NEVER });
+    for (const e of api.getSceneElementsIncludingDeleted()) if (res.changed.has(e.id)) before.set(e.id, e);
+    p.preview = { before, added: new Set(res.added.map((e) => e.id)) };
+    commitEdits(api, res, CaptureUpdateAction.NEVER);
   } else if (!on && p.preview) {
-    const before = p.preview;
+    const { before, added } = p.preview;
     p.preview = null;
-    api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map((e) => before.get(e.id) || e), captureUpdate: CaptureUpdateAction.NEVER });
+    api.updateScene({
+      elements: api.getSceneElementsIncludingDeleted().filter((e) => !added.has(e.id)).map((e) => before.get(e.id) || e),
+      captureUpdate: CaptureUpdateAction.NEVER,
+    });
   }
   notifyProposals();
 }
 
-export function applyProposal(api, id) {
+/**
+ * Accept or reject some of a proposal's edits (all pending ones when `indices` is omitted).
+ * Accepted edits are applied as one undo step; the proposal goes away when nothing is pending.
+ */
+export function resolveProposal(api, id, accept, indices = null) {
   const p = proposals.get(id);
   if (!p) return;
   previewProposal(api, id, false);
-  const { changed, done, skipped } = computeEdits(api, p);
-  proposals.delete(id);
+  const idx = (indices || pendingIdx(p)).filter((i) => p.state[i] === "pending");
+  if (accept && idx.length) {
+    const res = computeEdits(api, p, idx);
+    if (res.changed.size || res.added.length) {
+      commitEdits(api, res, CaptureUpdateAction.IMMEDIATELY);
+      api.setToast({ message: `Applied ${res.done} edit${res.done === 1 ? "" : "s"}${res.skipped.length ? ` (${res.skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`, duration: 3500 });
+    } else api.setToast({ message: "Nothing to change: those parts of the board are gone.", duration: 3000 });
+  }
+  const state = p.state.map((s, i) => (idx.includes(i) ? (accept ? "accepted" : "rejected") : s));
+  const next = { ...p, state };
+  if (state.every((s) => s !== "pending")) proposals.delete(id);
+  else proposals.set(id, next);
   notifyProposals();
-  if (!changed.size) return api.setToast({ message: "Nothing to change: those parts of the board are gone.", duration: 3000 });
-  api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e), captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-  api.setToast({ message: `Applied ${done} edit${done === 1 ? "" : "s"}${skipped.length ? ` (${skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`, duration: 4000 });
 }
-
-export function discardProposal(api, id) {
-  previewProposal(api, id, false);
-  proposals.delete(id);
-  notifyProposals();
-}
+export const applyProposal = (api, id) => resolveProposal(api, id, true);
+export const discardProposal = (api, id) => resolveProposal(api, id, false);
 
 /** Bounds of the elements a proposal touches, to scroll to them. */
 export function proposalTargets(api, id) {
@@ -786,10 +807,13 @@ const shortModel = (m) => {
  *   thread    a comment thread { id, elementIds, messages, sessionId, engine, cwd }: the reply goes
  *             to `reply` callbacks instead of a card; drawings, ink and edits still land on the board.
  */
-export async function askClaude(api, { scope = "auto", question = "", cwd, model = "", effort = "", editMode = "auto", picks = [], thread = null, reply = null }) {
+export async function askClaude(api, {
+  scope = "auto", question = "", cwd, model = "", effort = "", editMode = "auto", picks = [], thread = null, reply = null,
+  attachments = [], links = [], steps = false, maxBudget = 0, excludeAsk = null,
+}) {
   const askedAt = Date.now();
   await fontsReady();
-  const t = selectTargets(api, thread ? "viewport" : scope, { picks, question, threadIds: thread?.elementIds });
+  const t = selectTargets(api, thread ? "viewport" : scope, { picks, question, threadIds: thread?.elementIds, excludeAsk });
   if (!t.context.length && !thread) {
     api.setToast({ message: "The board is empty — draw something first.", duration: 3000 });
     return;
@@ -808,7 +832,7 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
     ...groups.map((g) => snapshot(api, g, groups.length > 1 ? 1200 : 1600)),
   ]);
   const summary = summarize(t.context, new Set(t.focus.map((e) => e.id)));
-  const prior = priorAnswers(live(api), anchor);
+  const prior = priorAnswers(live(api), anchor).filter((p) => !excludeAsk || p.id !== excludeAsk);
   // Labelled regions (R1…, D1…, C1…) so Claude can point at things with its ink and edit them.
   const regions = regionsFor(t.context);
   const marksImage = regions.length ? await snapshot(api, [...t.context, ...markElements(regions)], 2200) : null;
@@ -819,7 +843,7 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
 
   const runId = rid();
   const controller = new AbortController();
-  running.set(runId, { id: runId, scope: t.scope, startedAt: askedAt, status: "Sending…", controller, label: thread ? "Comment" : null, choice });
+  running.set(runId, { id: runId, scope: t.scope, startedAt: askedAt, status: "Sending…", controller, label: thread ? "Comment" : null, choice, maxBudget, model: shortModel(model) });
   notify();
 
   // ---- where things go: a placeholder card (answers) or straight into the thread (comments)
@@ -934,7 +958,7 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         image, focusImage: focusImages[0] || null, extraFocusImages: focusImages.slice(1), marksImage, regions: regionList, summary, question,
-        scope: t.scope, prior, cwd, model, effort, editMode,
+        scope: t.scope, prior, cwd, model, effort, editMode, attachments, links, steps, maxBudget,
         thread: thread ? { messages: thread.messages, sessionId: thread.sessionId || null, engine: thread.engine || null, cwd: thread.cwd || null } : null,
       }),
       signal: controller.signal,
@@ -950,6 +974,14 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
       else if (ev.type === "context")
         update({ status: ev.ids.length ? `Using ${ev.ids.length} earlier answer${ev.ids.length > 1 ? "s" : ""}…` : thread ? "Replying…" : "Answering…" });
       else if (ev.type === "delta") update({ answer: ev.answer, status: "" });
+      else if (ev.type === "usage") {
+        const r = running.get(runId);
+        if (r) {
+          r.tokens = { input: ev.input, output: ev.output };
+          notify();
+        }
+        reply?.usage?.(ev);
+      }
       else if (ev.type === "diagram" || ev.type === "draw") {
         if (!drew) update({ status: "Drawing…" });
         drew = true;
@@ -965,6 +997,7 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
     const meta = {
       question: question || "", scope: t.scope, askId: data.id, sessionId: data.sessionId, engine: data.engine || "claude", cwd: data.cwd,
       askedAt, contextIds: data.contextIds, followUpOf: data.followUpOf, model: data.model || "", effort: data.effort || "",
+      focusIds: t.focus.filter((e) => !isClaude(e)).slice(0, 300).map((e) => e.id),
       ...(thread ? { threadId: thread.id } : {}),
     };
     const cost = data.costUsd ? ` · $${data.costUsd.toFixed(2)}` : "";
@@ -983,6 +1016,8 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
     let visual = [];
     let visualSteps = [];
     let visualTitle = "Suggested diagram";
+    let stepOf = {};
+    let narration = [];
     if (data.draw?.length) {
       try {
         const d = buildDrawing(data.draw, { prefix: `${drawPrefix}f` });
@@ -992,6 +1027,8 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
           return s ? { ...e, seed: s } : e;
         });
         visualSteps = d.steps;
+        stepOf = d.stepOf || {};
+        narration = d.narration || [];
         visualTitle = data.draw.find((i) => i && !i.shape && i.title) ? "Drawing" : "Suggested drawing";
       } catch (e) {
         console.warn("drawing failed", e);
@@ -1026,10 +1063,14 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
       }
       block = [
         ...block,
-        ...[...titled, ...placed].map((e) => ({
+        ...[...titled, ...placed].map((e, i) => ({
           ...e,
           groupIds: [...(e.groupIds || []), groupId],
-          customData: { claude: true, ...meta, role: "diagram" },
+          customData: {
+            claude: true, ...meta, role: "diagram",
+            // walkthrough: each element's step, and the narration on the title
+            ...(narration.length ? { step: stepOf[e.id] || 0, ...(i === 0 ? { narration } : {}) } : {}),
+          },
         })),
       ];
     }
@@ -1084,24 +1125,27 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
       }
       insert(api, block);
       scrollIntoViewIfNeeded(api, block);
+      if (narration.length) startWalkthrough(api, data.id);
     }
 
     // Edits to existing content (recolour, retype, move, remove).
     let proposal = null;
     if (Array.isArray(data.edits) && data.edits.length && editMode !== "off") {
       if (editMode === "ask") {
-        const targets = [...new Set(data.edits.flatMap((c) => (Array.isArray(c.targets) ? c.targets : [c.target])).filter(Boolean).map((x) => String(x).toUpperCase()))];
-        proposal = { id: rid(), askId: data.id, commands: data.edits, regions, targets, lines: describeEdits(data.edits, regions), createdAt: Date.now(), source: thread ? "comment" : "card" };
+        const commands = data.edits.slice(0, 80);
+        const targets = [...new Set(commands.flatMap((c) => [...(Array.isArray(c.targets) ? c.targets : [c.target]), ...(Array.isArray(c.between) ? c.between : []), c.near, c.from, c.to]).filter((x) => typeof x === "string").map((x) => x.toUpperCase()))];
+        proposal = {
+          id: rid(), askId: data.id, commands, regions, targets, lines: describeEdits(commands, regions), state: commands.map(() => "pending"),
+          createdAt: Date.now(), source: thread ? "comment" : "card", threadId: thread?.id || null,
+        };
         proposals.set(proposal.id, proposal);
         notifyProposals();
       } else {
-        const { changed, done, skipped } = applyEdits({ commands: data.edits, regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
+        const res = applyEdits({ commands: data.edits, regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
+        const { changed, added, done, skipped } = res;
         if (skipped.length) console.warn("some edits were skipped:", skipped);
-        if (changed.size) {
-          api.updateScene({
-            elements: api.getSceneElementsIncludingDeleted().map((e) => changed.get(e.id) || e),
-            captureUpdate: CaptureUpdateAction.IMMEDIATELY,
-          });
+        if (changed.size || added.length) {
+          commitEdits(api, res, CaptureUpdateAction.IMMEDIATELY);
           api.setToast({
             message: `Claude edited ${done} part${done === 1 ? "" : "s"} of the board${skipped.length ? ` (${skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`,
             duration: 5000,
@@ -1113,6 +1157,7 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
       answer: data.answer || "(empty answer)", sessionId: data.sessionId, engine: data.engine, cwd: data.cwd, model: modelLabel, effort: data.effort || "",
       durationMs: data.durationMs, costUsd: data.costUsd, drew: visual.length > 0, inked: ink.length > 0, proposalId: proposal?.id || null,
       edited: !!(Array.isArray(data.edits) && data.edits.length && editMode === "auto"),
+      steps: narration.length,
       askId: data.id,
     });
     if (ink.length) await animateInk(api, ink);
@@ -1136,4 +1181,4 @@ export async function askClaude(api, { scope = "auto", question = "", cwd, model
 }
 
 // Debug hook (used by tests / devtools).
-window.__wbDebug = { selectTargets, newInk, buildDrawing, diagramElements };
+window.__wbDebug = { selectTargets, newInk, buildDrawing, diagramElements, regionsFor, applyEdits };

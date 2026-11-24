@@ -11,6 +11,7 @@
 //    when the user asks for their content to be changed rather than marked up.
 import { convertToExcalidrawElements, getCommonBounds, FONT_FAMILY, CaptureUpdateAction, newElementWith } from "@excalidraw/excalidraw";
 import { makeFreedraw, penDescriptor, PRESETS } from "./pens.js";
+import { buildDrawing, exitPoint } from "./draw.js";
 
 export const INK_COLOR = "#7048e8";
 const MARK_COLOR = "#f76707";
@@ -454,21 +455,179 @@ function retextInContainer(container, t, text) {
  *   {"do":"style","targets":["R1","D2"],"fill":"#ffc9c9","stroke":"#e03131","textColor":"#1e1e1e","fillStyle":"solid","strokeWidth":2,"strokeStyle":"dashed"}
  *   {"do":"relabel","target":"R6","text":"new text"}             (whole text; or "from":"old phrase" to replace a part)
  *   {"do":"delete","target":"R9"}
- * Returns { changed: Map(id -> new element), done: n, skipped: [reasons] }.
+ *   {"do":"add","shape":"cylinder","text":"Cache","between":["D2","D3"]} | {"near":"D5","side":"right","from":"D5","to":"R2"}
+ *   {"do":"connect","from":"D2","to":"R4","label":"retry"}  {"do":"disconnect","from":"D2","to":"D3"}
+ * Returns { changed: Map(id -> new element), added: [new elements], done: n, skipped: [reasons] }.
  */
 export function applyEdits({ commands, regions, elementsById }) {
   const changed = new Map();
-  const cur = (id) => changed.get(id) || elementsById.get(id);
-  const set = (el, patch) => changed.set(el.id, newElementWith(el, patch));
+  const added = [];
+  const cur = (id) => changed.get(id) || elementsById.get(id) || added.find((e) => e.id === id);
+  const set = (el, patch) => {
+    const i = added.findIndex((e) => e.id === el.id);
+    if (i >= 0) added[i] = { ...added[i], ...patch };
+    else changed.set(el.id, newElementWith(el, patch));
+  };
   const skipped = [];
   let done = 0;
   const regionOf = (id) => {
     const r = regions.find((r) => r.id === String(id || "").trim().toUpperCase());
     return r && !r.id.startsWith("C") ? r : null; // answer cards are not editable
   };
+  const liveMembers = (r) => r.ids.map(cur).filter((e) => e && !e.isDeleted);
+  const boxOfRegion = (r) => {
+    const m = liveMembers(r);
+    return m.length ? boundsOf(m) : r.bounds;
+  };
+  // the shape an arrow should attach to: a box/ellipse/diamond, preferably the one holding the label
+  const anchorOf = (r) => {
+    const shapes = liveMembers(r).filter((e) => ["rectangle", "ellipse", "diamond"].includes(e.type));
+    if (!shapes.length) return null;
+    return shapes.find((e) => e.boundElements?.some((b) => b.type === "text")) || shapes.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+  };
+  const arrowColour = (fromEl) => {
+    const from = fromEl && cur(fromEl.id);
+    // match the arrows already attached (including ones this edit just replaced)
+    const a = from?.boundElements?.map((b) => b.type === "arrow" && (elementsById.get(b.id) || cur(b.id))).find(Boolean);
+    return a?.strokeColor || (from?.customData?.role === "diagram" ? INK_COLOR : "#1e1e1e");
+  };
+  const metaFor = (near) => (near?.customData?.claude ? { claude: true, role: "diagram", askId: near.customData.askId, askedAt: near.customData.askedAt } : undefined);
+  /** A new arrow bound to two shapes (either can be null to leave that end free at a point). */
+  const connect = (fromEl, fromBox, toEl, toBox, opts = {}) => {
+    const fc = [(fromBox.minX + fromBox.maxX) / 2, (fromBox.minY + fromBox.maxY) / 2];
+    const tc = [(toBox.minX + toBox.maxX) / 2, (toBox.minY + toBox.maxY) / 2];
+    let s0 = exitPoint(fromBox, tc[0], tc[1], 8, fromEl?.type === "ellipse");
+    let e0 = exitPoint(toBox, fc[0], fc[1], 8, toEl?.type === "ellipse");
+    // bend around shapes that sit on the straight line
+    let mid = null;
+    const obstacles = regions
+      .map((r) => r.ids.map(cur).filter((e) => e && !e.isDeleted && ["rectangle", "ellipse", "diamond", "line"].includes(e.type) && e.strokeColor !== "transparent"))
+      .filter((m) => m.length && !m.some((e) => e.id === fromEl?.id || e.id === toEl?.id))
+      .map((m) => boundsOf(m))
+      .concat(added.filter((e) => ["rectangle", "ellipse", "diamond"].includes(e.type) && e.id !== fromEl?.id && e.id !== toEl?.id && e.strokeColor !== "transparent").map((e) => boundsOf([e])));
+    const blocked = (a, b) => obstacles.filter((o) => {
+      for (let t = 0.05; t < 0.95; t += 0.05) {
+        const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+        if (x > o.minX - 6 && x < o.maxX + 6 && y > o.minY - 6 && y < o.maxY + 6) return true;
+      }
+      return false;
+    });
+    const hits = blocked(s0, e0);
+    if (hits.length) {
+      const len = Math.hypot(e0[0] - s0[0], e0[1] - s0[1]) || 1;
+      const nx = -(e0[1] - s0[1]) / len, ny = (e0[0] - s0[0]) / len;
+      const reach = Math.max(...hits.map((o) => Math.max(o.maxX - o.minX, o.maxY - o.minY))) / 2 + 60;
+      const m0 = [(s0[0] + e0[0]) / 2, (s0[1] + e0[1]) / 2];
+      const options = [1, -1].map((sgn) => [m0[0] + nx * reach * sgn * 1.6, m0[1] + ny * reach * sgn * 1.6]);
+      mid = options.sort((p, q) => blocked(s0, p).length + blocked(p, e0).length - (blocked(s0, q).length + blocked(q, e0).length))[0];
+      s0 = exitPoint(fromBox, mid[0], mid[1], 8, fromEl?.type === "ellipse");
+      e0 = exitPoint(toBox, mid[0], mid[1], 8, toEl?.type === "ellipse");
+      mid = [0.25 * s0[0] + 0.5 * mid[0] + 0.25 * e0[0], 0.25 * s0[1] + 0.5 * mid[1] + 0.25 * e0[1]];
+    }
+    const label = opts.label ? String(opts.label).slice(0, 40) : "";
+    const els = convertToExcalidrawElements([{
+      type: "arrow", x: s0[0], y: s0[1], points: mid ? [[0, 0], [mid[0] - s0[0], mid[1] - s0[1]], [e0[0] - s0[0], e0[1] - s0[1]]] : [[0, 0], [e0[0] - s0[0], e0[1] - s0[1]]],
+      roundness: mid ? { type: 2 } : null,
+      strokeColor: opts.color || arrowColour(fromEl), strokeWidth: 2, roughness: 1, strokeStyle: opts.dashed ? "dashed" : "solid",
+      endArrowhead: "arrow", startArrowhead: opts.both ? "arrow" : null,
+      ...(label ? { label: { text: label, fontSize: 16, fontFamily: FONT_FAMILY.Excalifont, strokeColor: opts.color || arrowColour(fromEl) } } : {}),
+    }]);
+    const meta = metaFor(fromEl) || metaFor(toEl);
+    let arrow = { ...els[0], ...(meta ? { customData: meta } : {}) };
+    if (fromEl) arrow.startBinding = { elementId: fromEl.id, focus: 0, gap: 8 };
+    if (toEl) arrow.endBinding = { elementId: toEl.id, focus: 0, gap: 8 };
+    added.push(arrow, ...els.slice(1).map((t) => ({ ...t, ...(meta ? { customData: meta } : {}) })));
+    for (const el of [fromEl, toEl]) if (el) set(el, { boundElements: [...(cur(el.id).boundElements || []), { id: arrow.id, type: "arrow" }] });
+    return arrow;
+  };
+  /** Arrows bound between two shapes, in either direction. */
+  const arrowsBetween = (a, b) =>
+    [...new Set([...(cur(a.id).boundElements || []), ...(cur(b.id).boundElements || [])].filter((x) => x.type === "arrow").map((x) => x.id))]
+      .map(cur)
+      .filter((e) => e && !e.isDeleted && [e.startBinding?.elementId, e.endBinding?.elementId].sort().join() === [a.id, b.id].sort().join());
+  const removeArrow = (ar) => {
+    set(ar, { isDeleted: true });
+    for (const t of ar.boundElements || []) if (t.type === "text" && cur(t.id)) set(cur(t.id), { isDeleted: true });
+  };
 
   for (const c of (commands || []).slice(0, 80)) {
     const act = String(c.do || c.action || "").toLowerCase();
+    // ---- structural edits (they name regions with between/near/from/to, not target)
+    if (["add", "insert", "connect", "link", "disconnect", "unlink"].includes(act)) {
+      try {
+        if (act === "connect" || act === "link") {
+          const ra = regionOf(c.from), rb = regionOf(c.to);
+          if (!ra || !rb) throw new Error("no such region");
+          connect(anchorOf(ra), boxOfRegion(ra), anchorOf(rb), boxOfRegion(rb), { label: c.label || c.text, dashed: c.dashed, both: c.ends === "both" });
+        } else if (act === "disconnect" || act === "unlink") {
+          const ra = regionOf(c.from), rb = regionOf(c.to);
+          const a = ra && anchorOf(ra), b = rb && anchorOf(rb);
+          if (!a || !b) throw new Error("no shapes to disconnect");
+          const arrows = arrowsBetween(a, b);
+          if (!arrows.length) throw new Error("no arrow between them");
+          arrows.forEach(removeArrow);
+        } else {
+          // add a shape: between two connected shapes, or beside one
+          const between = Array.isArray(c.between) ? c.between.map(regionOf) : null;
+          const near = regionOf(c.near || c.target || (between ? null : c.from));
+          const item = { shape: c.shape || "rect", text: c.text ?? c.label ?? "", color: c.color, fill: c.fill, dashed: c.dashed, bold: c.bold, at: [0, 0] };
+          if (!item.text && !c.shape) throw new Error("nothing to add");
+          const { elements } = buildDrawing([item], { prefix: `e${Math.random().toString(36).slice(2, 8)}`, ink: false });
+          if (!elements.length) throw new Error(`unknown shape "${c.shape}"`);
+          const nb = boundsOf(elements);
+          const nw = nb.maxX - nb.minX, nh = nb.maxY - nb.minY;
+          let cx, cy, neighbour;
+          if (between && between[0] && between[1]) {
+            const A = boxOfRegion(between[0]), B = boxOfRegion(between[1]);
+            const ac = [(A.minX + A.maxX) / 2, (A.minY + A.maxY) / 2], bc = [(B.minX + B.maxX) / 2, (B.minY + B.maxY) / 2];
+            [cx, cy] = [(ac[0] + bc[0]) / 2, (ac[1] + bc[1]) / 2];
+            // not enough room between them: step out to the side so nothing overlaps
+            const hit = (b) => cx - nw / 2 < b.maxX + 16 && cx + nw / 2 > b.minX - 16 && cy - nh / 2 < b.maxY + 16 && cy + nh / 2 > b.minY - 16;
+            if (hit(A) || hit(B)) {
+              const len = Math.hypot(bc[0] - ac[0], bc[1] - ac[1]) || 1;
+              const px = -(bc[1] - ac[1]) / len, py = (bc[0] - ac[0]) / len;
+              const d = Math.abs(px) * (nw + Math.max(A.maxX - A.minX, B.maxX - B.minX)) / 2 + Math.abs(py) * (nh + Math.max(A.maxY - A.minY, B.maxY - B.minY)) / 2 + 60;
+              cx += px * d;
+              cy += py * d;
+            }
+            neighbour = anchorOf(between[0]) || anchorOf(between[1]);
+          } else if (near) {
+            const b = boxOfRegion(near);
+            const side = String(c.side || "right").toLowerCase();
+            const gap = 120;
+            if (side === "left") [cx, cy] = [b.minX - gap - nw / 2, (b.minY + b.maxY) / 2];
+            else if (side === "above" || side === "top") [cx, cy] = [(b.minX + b.maxX) / 2, b.minY - gap - nh / 2];
+            else if (side === "below" || side === "bottom") [cx, cy] = [(b.minX + b.maxX) / 2, b.maxY + gap + nh / 2];
+            else [cx, cy] = [b.maxX + gap + nw / 2, (b.minY + b.maxY) / 2];
+            neighbour = anchorOf(near);
+          } else throw new Error('"add" needs "between" or "near"');
+          const dx = cx - (nb.minX + nb.maxX) / 2, dy = cy - (nb.minY + nb.maxY) / 2;
+          const meta = metaFor(neighbour);
+          const placed = elements.map((e) => ({ ...e, x: e.x + dx, y: e.y + dy, ...(meta ? { customData: { ...meta } } : {}) }));
+          added.push(...placed);
+          const newAnchor = placed.find((e) => e.boundElements?.some((b) => b.type === "text") && ["rectangle", "ellipse", "diamond"].includes(e.type)) || placed.find((e) => ["rectangle", "ellipse", "diamond"].includes(e.type));
+          const newBox = boundsOf(placed);
+          if (between && between[0] && between[1]) {
+            const a = anchorOf(between[0]), b = anchorOf(between[1]);
+            const old = a && b ? arrowsBetween(a, b) : [];
+            const oldLabel = old.map((ar) => (ar.boundElements || []).map((t) => cur(t.id)).find((t) => t?.type === "text")?.text).find(Boolean);
+            const forward = !old.length || old[0].startBinding?.elementId === a?.id;
+            old.forEach(removeArrow);
+            const [first, second] = forward ? [between[0], between[1]] : [between[1], between[0]];
+            connect(anchorOf(first), boxOfRegion(first), newAnchor, newBox, { label: c.label || oldLabel, dashed: c.dashed });
+            connect(newAnchor, newBox, anchorOf(second), boxOfRegion(second), {});
+          } else {
+            const from = regionOf(c.from), to = regionOf(c.to);
+            if (from) connect(anchorOf(from), boxOfRegion(from), newAnchor, newBox, { label: c.label });
+            if (to) connect(newAnchor, newBox, anchorOf(to), boxOfRegion(to), { label: from ? undefined : c.label });
+          }
+        }
+        done++;
+      } catch (e) {
+        skipped.push(`${act}: ${e.message}`);
+      }
+      continue;
+    }
     const targets = (Array.isArray(c.targets) ? c.targets : [c.target]).filter(Boolean);
     const rs = targets.map(regionOf).filter(Boolean);
     if (!rs.length) {
@@ -546,7 +705,7 @@ export function applyEdits({ commands, regions, elementsById }) {
       skipped.push(`${act} ${targets.join(",")}: ${e.message}`);
     }
   }
-  return { changed, done, skipped };
+  return { changed, added, done, skipped };
 }
 
 /** Short human descriptions of edit commands, for the "apply these edits?" panel. */
@@ -567,6 +726,12 @@ export function describeEdits(commands, regions) {
     if (["relabel", "retext", "rename", "replace"].includes(act)) return { kind: "text", text: `Rename ${who}`, detail: `${c.from ? `“${c.from}” → ` : "→ "}“${c.text ?? c.to ?? ""}”` };
     if (act === "move" || act === "nudge") return { kind: "move", text: `Move ${who}`, detail: `${c.dx || 0}, ${c.dy || 0}` };
     if (act === "delete" || act === "remove") return { kind: "delete", text: `Delete ${who}`, detail: "" };
+    if (act === "add" || act === "insert") {
+      const where = Array.isArray(c.between) ? `between ${c.between.map(name).join(" and ")}` : c.near ? `${c.side || "right"} of ${name(c.near)}` : "";
+      return { kind: "add", text: `Add ${c.shape || "box"} “${c.text ?? ""}”`, detail: where, swatches: [] };
+    }
+    if (act === "connect" || act === "link") return { kind: "connect", text: `Connect ${name(c.from)} → ${name(c.to)}`, detail: c.label ? `“${c.label}”` : "" };
+    if (act === "disconnect" || act === "unlink") return { kind: "delete", text: `Remove arrow ${name(c.from)} → ${name(c.to)}`, detail: "" };
     return { kind: "other", text: `${act} ${who}`, detail: "" };
   });
 }

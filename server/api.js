@@ -139,6 +139,11 @@ function runClaude({ content, args, cwd, timeoutMs, onEvent, onChild }) {
       const e = new Error(String(msg).slice(0, 2000));
       e.budget = !!rejected || [402, 429, 529].includes(Number(result?.api_error_status)) || BUDGET_RE.test(String(msg));
       e.resetsAt = rejected?.resetsAt ? rejected.resetsAt * 1000 : null;
+      // the per-answer cost cap (--max-budget-usd) is not the account being out of budget
+      if (/max_budget/i.test(String(result?.subtype || "")) || /max(?:imum)?[ _-]?budget/i.test(String(msg))) {
+        e.budget = false;
+        e.capHit = true;
+      }
       reject(e);
     });
     child.stdin.end(JSON.stringify({ type: "user", message: { role: "user", content } }) + "\n");
@@ -317,9 +322,13 @@ const EDIT_COMMANDS = `Edit commands (a JSON array inside <edit></edit>):
   {"do":"relabel","target":"D3","text":"new label"}                          replace the typed text of a region
   {"do":"relabel","target":"R2","from":"old words","text":"new words"}      replace part of it
   {"do":"move","target":"R5","dx":120,"dy":0}                                 nudge a region (scene px) to tidy a layout
+  {"do":"add","shape":"cylinder","text":"Redis cache","between":["D2","D3"],"color":"teal"}   insert a new shape between two connected shapes (their arrow is re-routed through it)
+  {"do":"add","shape":"rect","text":"Audit log","near":"D5","side":"right","from":"D5","label":"writes"}   add a shape beside a region, optionally connected from/to regions
+  {"do":"connect","from":"D2","to":"R4","label":"retry","dashed":true}       draw a new arrow between two existing shapes
+  {"do":"disconnect","from":"D2","to":"D3"}                                    remove the arrow(s) between two shapes
   {"do":"delete","target":"R9"}                                              remove a region (only when the user asks to remove it)
 Colours that suit the board: stroke #1e1e1e #e03131 #2f9e44 #1971c2 #f08c00 #9c36b5 #0c8599; fill #ffc9c9 #b2f2bb #a5d8ff #ffec99 #eebefa #ffd8a8 #99e9f2 #e9ecef. For handwriting and pen strokes, "stroke" recolours the ink; handwriting can't be relabelled (strike it and add a note instead).
-Group regions that get the same change into one command with "targets". At most 60 commands. To restructure one of your own diagrams beyond recolouring, renaming or moving, draw a new one instead.`;
+"add" takes any <draw> shape name and "color"; "side" is right, left, above or below. Use add/connect/disconnect to change the structure of a diagram in place (yours or the user's) instead of redrawing it. Group regions that get the same change into one command with "targets". At most 60 commands. Redraw from scratch only when most of the diagram changes.`;
 
 const EDIT_POLICY = {
   auto: `EDITING IS ON (Claude decides). You may change existing content: the user's (R…) and your own diagrams (D…), never answer cards (C…).
@@ -339,7 +348,8 @@ const DRAW_HELP = `FREEFORM DRAWING (<draw>): when a picture explains better tha
   {"shape":"note","text":"Hit ratio ~95%","at":[1,2.2],"color":"yellow"}
 Shapes with text: rect, rounded, pill (start/end), ellipse, circle, diamond (decision), parallelogram (input/output), cylinder (database/storage), document, hexagon (preparation/config), subroutine, cloud (internet/external service), person (user/actor), note (sticky note), callout (speech bubble), queue. Others: text (free text; "size":"s|m|l|xl"), title (big heading), arrow / line (from,to ids; "label", "dashed", "thick", "ends":"both", "route":"straight|curve|elbow"), brace (curly brace; "around":[ids], "side":"left|right|top|bottom", "text"), bracket (square bracket, same keys), group (a dashed box around ids with a title: "around":[ids],"text"), table ("rows":[["Head","Head"],["a","b"]], "at"), check / cross / star / warning (small marks, "at" or "near":id), number (a numbered circle "text":"1", "near":id).
 Item keys: "w"/"h" in cells to make a shape bigger (default 0.75×0.5), "color": red, orange, yellow, green, teal, blue, violet, pink, grey (or a hex), "fill":"none" for an outline only, "bold":true for a thick border, "dashed":true.
-Before drawing, load the board-diagrams skill for the shape vocabulary, colour rules and layout templates. At most ~30 items.`;
+STEP-BY-STEP: to walk the user through something, split the drawing into steps with marker lines {"step":1,"say":"First the browser asks DNS for the IP."}; every item after a marker belongs to that step, items before the first marker are always shown. The user plays the steps one at a time with your "say" narration (one or two sentences each). Use 3–7 steps. Use steps whenever the user asks to explain step by step, walk through, teach or animate a process.
+Before drawing, load the board-diagrams skill for the shape vocabulary, colour rules and layout templates. At most ~30 items (excluding step markers).`;
 
 function regionText(regions) {
   if (!regions?.length) return "";
@@ -355,7 +365,7 @@ const threadText = (thread) =>
     .map((m) => `${m.author === "claude" ? "You" : "User"}: ${String(m.text || "").slice(0, 1500)}`)
     .join("\n");
 
-function buildPrompt({ hasFocus, focusCount = 1, summary, question, scope, earlier, cwd, resumed, regions, engine = "claude", editMode = "auto", thread }) {
+function buildPrompt({ hasFocus, focusCount = 1, summary, question, scope, earlier, cwd, resumed, regions, engine = "claude", editMode = "auto", thread, attachments = [], links = [], steps = false }) {
   const comment = !!thread;
   const images = hasFocus
     ? `- FOCUS image${focusCount > 1 ? `s 1–${focusCount}` : ""}: ${SCOPE_LABEL[scope] || SCOPE_LABEL.new}.${focusCount > 1 ? " The user picked these parts from different places on the board; treat them together." : ""} Respond to this.
@@ -387,7 +397,7 @@ ${earlierText}
 Typed text, shapes and arrows extracted from the board (handwriting is not included; [NEW] = added since your last answer):
 ${summary || "(none)"}
 ${regions?.length ? `\nLabelled regions in the MARKS image (R = the user's content, D = shapes of your diagrams, C = your answer cards; current colours in brackets):\n${regionText(regions)}\n\n${INK_HELP}\n\n${edit}${canEdit ? `\n${EDIT_COMMANDS}` : ""}\n` : ""}
-${question?.trim() ? `\nThe user ${comment ? "just wrote in the thread" : "also typed"}: "${question.trim()}"\n` : ""}
+${question?.trim() ? `\nThe user ${comment ? "just wrote in the thread" : "also typed"}: "${question.trim()}"\n` : ""}${attachments.length ? `\nThe user ATTACHED files for this question. Read each one first (the Read tool handles PDFs, images and text):\n${attachments.map((a) => `- ${a}`).join("\n")}\n` : ""}${links.length ? `\nThe user attached LINKS. Fetch each with WebFetch first:\n${links.map((u) => `- ${u}`).join("\n")}\n` : ""}${steps ? `\nThe user asked for a STEP-BY-STEP walkthrough: answer with a <draw> split into steps (see STEP-BY-STEP below), and keep the card to a short summary.\n` : ""}
 How to respond:
 - Work out the intent from the content itself:
   - A question: answer it.
@@ -529,6 +539,10 @@ async function handleAsk(req, res) {
   const editMode = EDIT_MODES.has(body.editMode) ? body.editMode : "auto";
   // A comment thread: the reply goes into the thread instead of a card.
   const thread = body.thread && Array.isArray(body.thread.messages) ? body.thread : null;
+  const steps = !!body.steps;
+  // Cost cap for this answer (Claude Code stops when it's reached).
+  const maxBudget = Number(body.maxBudget) > 0 ? Math.min(100, Number(body.maxBudget)) : 0;
+  const links = (Array.isArray(body.links) ? body.links : []).map(String).filter((u) => /^https?:\/\/\S+$/i.test(u)).slice(0, 8);
 
   let cwd = CLAUDE_CWD;
   if (body.cwd?.trim()) {
@@ -542,6 +556,17 @@ async function handleAsk(req, res) {
   await fsp.writeFile(path.join(dir, "board.png"), Buffer.from(contextB64, "base64"));
   if (focusB64) await fsp.writeFile(path.join(dir, "focus.png"), Buffer.from(focusB64, "base64"));
   if (marksB64) await fsp.writeFile(path.join(dir, "marks.png"), Buffer.from(marksB64, "base64"));
+  // Files the user attached: saved next to the ask so Claude can Read them (it has --add-dir on this folder).
+  const attachmentPaths = [];
+  for (const [i, a] of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8).entries()) {
+    const m = /^data:([^;,]*)(?:;base64)?,(.*)$/s.exec(a?.data || "");
+    if (!m) continue;
+    const name = `${i + 1}-${String(a.name || "file").replace(/[^\w.\- ]/g, "_").slice(0, 80)}`;
+    const f = path.join(dir, "attachments", name);
+    await fsp.mkdir(path.dirname(f), { recursive: true });
+    await fsp.writeFile(f, Buffer.from(m[2], a.data.includes(";base64,") ? "base64" : "utf8"));
+    attachmentPaths.push(f);
+  }
   const extraFocusPaths = [];
   for (const [i, b64] of extraFocusB64.entries()) {
     const f = path.join(dir, `focus-${i + 2}.png`);
@@ -565,9 +590,9 @@ async function handleAsk(req, res) {
   });
 
   const selectImages = [focusB64 && path.join(dir, "focus.png"), ...extraFocusPaths, path.join(dir, "board.png")].filter(Boolean);
-  const answerImages = [...selectImages, marksB64 && path.join(dir, "marks.png")].filter(Boolean);
+  const answerImages = [...selectImages, marksB64 && path.join(dir, "marks.png"), ...attachmentPaths.filter((f) => /\.(png|jpe?g|gif|webp)$/i.test(f))].filter(Boolean);
   const started = Date.now();
-  const log = { id, scope, question, cwd, model, effort, editMode, thread: !!thread, prior: prior.map((p) => p.id) };
+  const log = { id, scope, question, cwd, model, effort, editMode, maxBudget, steps, attachments: attachmentPaths, links, thread: !!thread, prior: prior.map((p) => p.id) };
   console.log(`[ask ${id}] scope=${scope} prior=${prior.length} model=${model || "default"} effort=${effort || "default"} edits=${editMode}${thread ? " (comment)" : ""} cwd=${cwd}`);
   try {
     // ---- step 1: pick relevant earlier answers
@@ -607,7 +632,7 @@ async function handleAsk(req, res) {
     const canResume = parent?.sessionId && (parent.engine || "claude") === "claude" && path.resolve(parent.cwd || CLAUDE_CWD) === cwd;
     const promptArgs = {
       hasFocus: !!focusB64, focusCount: 1 + extraFocusB64.length, summary, question, scope, earlier, cwd,
-      regions: marksB64 ? regions : [], editMode, thread,
+      regions: marksB64 ? regions : [], editMode, thread, attachments: attachmentPaths, links, steps,
     };
     const answer = async (resume) => {
       const prompt = buildPrompt({ ...promptArgs, resumed: resume });
@@ -615,6 +640,7 @@ async function handleAsk(req, res) {
       const args = ["--add-dir", dir, "--plugin-dir", AGENT_PLUGIN_DIR];
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
+      if (maxBudget) args.push("--max-budget-usd", String(maxBudget));
       if (resume) args.push("--resume", parent.sessionId, "--fork-session");
       args.push("--include-partial-messages");
       let text = "";
@@ -622,6 +648,16 @@ async function handleAsk(req, res) {
       let lastAt = 0;
       let lastDiagram = "";
       let drawCount = 0;
+      // live token counts, per API message (input incl. cache, output so far)
+      const usage = new Map();
+      let usageAt = 0;
+      const emitUsage = (force) => {
+        if (!force && Date.now() - usageAt < 400) return;
+        usageAt = Date.now();
+        let input = 0, output = 0;
+        for (const u of usage.values()) { input += u.input; output += u.output; }
+        emit({ type: "usage", input, output, elapsedMs: Date.now() - started });
+      };
       return runClaude({
         content: [...imageBlocks(focusB64, contextB64, marksB64, extraFocusB64), { type: "text", text: prompt }],
         args,
@@ -629,7 +665,19 @@ async function handleAsk(req, res) {
         timeoutMs: CLAUDE_TIMEOUT_MS,
         onChild: track,
         onEvent: (ev) => {
-          if (ev.type === "stream_event" && ev.event?.type === "content_block_delta" && ev.event.delta?.type === "text_delta") {
+          if (ev.type === "stream_event" && ev.event?.type === "message_start") {
+            const u = ev.event.message?.usage || {};
+            usage.set(ev.event.message?.id || usage.size, { input: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0), output: u.output_tokens || 0 });
+            usage.lastId = ev.event.message?.id || usage.size - 1;
+            emitUsage(true);
+          } else if (ev.type === "stream_event" && ev.event?.type === "message_delta" && ev.event.usage) {
+            const cur = usage.get(usage.lastId);
+            if (cur) cur.output = ev.event.usage.output_tokens || cur.output;
+            emitUsage(false);
+          } else if (ev.type === "stream_event" && ev.event?.type === "content_block_delta" && ev.event.delta?.type === "text_delta") {
+            const cur = usage.get(usage.lastId);
+            if (cur) cur.output += Math.max(1, Math.round(ev.event.delta.text.length / 4)); // estimate until the next usage update
+            emitUsage(false);
             text += ev.event.delta.text;
             const vis = visibleAnswer(text);
             if (vis && vis !== lastSent && Date.now() - lastAt > 120) {
@@ -682,7 +730,7 @@ async function handleAsk(req, res) {
         try {
           result = await answer(canResume);
         } catch (e) {
-          if (!canResume || cancelled || e.budget) throw e;
+          if (!canResume || cancelled || e.budget || e.capHit) throw e;
           console.warn(`[ask ${id}] resume failed, answering fresh:`, e.message);
           result = await answer(false);
         }
@@ -728,7 +776,8 @@ async function handleAsk(req, res) {
   } catch (e) {
     console.error(`[ask ${id}] ${cancelled ? "cancelled by user" : `failed: ${e.message}`}`);
     log.error = String(e.stack || e);
-    emit({ type: "error", error: cancelled ? "cancelled" : e.message });
+    const budgetHit = maxBudget && (e.capHit || /max(?:imum)?[ _-]?budget/i.test(e.message));
+    emit({ type: "error", error: cancelled ? "cancelled" : budgetHit ? `Stopped: this answer reached its cost cap of $${maxBudget.toFixed(2)}. Raise the cap and ask again.` : e.message });
   } finally {
     await fsp.writeFile(path.join(dir, "result.json"), JSON.stringify(log, null, 2)).catch(() => {});
     res.end();
