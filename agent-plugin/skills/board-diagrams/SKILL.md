@@ -276,6 +276,10 @@ labelled regions rather than drawing a new one (when edits are allowed):
 - add beside: `{"do":"add","shape":"document","text":"Audit log","near":"D5","side":"below","from":"D5","label":"writes"}`;
 - connect / disconnect: `{"do":"connect","from":"D2","to":"R4","label":"retry","dashed":true}`,
   `{"do":"disconnect","from":"D2","to":"D3"}`;
+- a new shape has no D… label yet, so never guess one for it. Connect it with `from`/`to` on the add itself, or
+  give it an `id` and use that in later commands of the same edit:
+  `{"do":"add","id":"mc","shape":"octagon","text":"Merge conflict","near":"D17","side":"below","color":"red"}`
+  then `{"do":"connect","from":"D11","to":"mc","label":"conflict","dashed":true}`;
 - plus `style`, `relabel`, `move`, `delete` for everything else.
 
 New arrows bend around shapes in their way and match the colour of existing arrows. Redraw from scratch only when

@@ -436,6 +436,12 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
     return { minX: cx - 1, minY: cy - 1, maxX: cx + 1, maxY: cy + 1 };
   };
 
+  // small marks placed near shapes, and the strips brackets occupy, so the two don't collide
+  const markBoxes = new Map(); // item id -> union box of marks placed near it
+  const bracketZones = [];
+  const overlaps = (a, b) => a.minX < b.maxX && a.maxX > b.minX && a.minY < b.maxY && a.maxY > b.minY;
+  const ptsBox = (pts, pad = 0) => ({ minX: Math.min(...pts.map((q) => q[0])) - pad, minY: Math.min(...pts.map((q) => q[1])) - pad, maxX: Math.max(...pts.map((q) => q[0])) + pad, maxY: Math.max(...pts.map((q) => q[1])) + pad });
+
   const anyColour = items.some((i) => i && i.shape && (i.color || i.fill || i.stroke));
   const autoColour = !ink && !anyColour && opts.autoColor !== false;
 
@@ -583,8 +589,11 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
 
       // ---------- braces, brackets, groups
       if (BRACKETS.has(shape)) {
-        const boxes = boxesOf(item.around || item.targets || []);
+        const aroundIds = (Array.isArray(item.around || item.targets) ? item.around || item.targets : [item.around || item.targets]).filter((v) => v != null).map(String);
+        const boxes = boxesOf(aroundIds);
         let b = boxes.length ? boxes.reduce(union) : null;
+        // make room for badges / ticks already placed beside the items
+        if (b) for (const i of aroundIds) if (markBoxes.has(i)) b = union(b, markBoxes.get(i));
         if (!b && item.from && item.to) {
           const [x0, y0] = cellCentre(item.from), [x1, y1] = cellCentre(item.to);
           b = { minX: Math.min(x0, x1), minY: Math.min(y0, y1), maxX: Math.max(x0, x1), maxY: Math.max(y0, y1) };
@@ -605,8 +614,13 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
         const sw = item.bold || item.thick ? 3.5 : 2;
         const ls = { strokeColor: stroke, roughness: 0, strokeWidth: sw, strokeStyle: item.dashed ? "dashed" : "solid", groupIds: [groupId] };
         const g = bracketMark(shape, b, side, Number(item.depth) || 0);
-        if (pair) push(lineSkel(bracketMark(shape, b, opposite, Number(item.depth) || 0).pts, ls));
+        if (pair) {
+          const g2 = bracketMark(shape, b, opposite, Number(item.depth) || 0);
+          push(lineSkel(g2.pts, ls));
+          bracketZones.push(ptsBox(g2.pts, 6));
+        }
         push(lineSkel(g.pts, ls));
+        bracketZones.push(ptsBox(g.pts, 6));
         if (item.text) push(sideText(wrapText(item.text, 26), g.tip, side, { fontSize: fontSizeOf(item, 18), fontFamily: font, strokeColor: ink ? INK_COLOR : stroke === DEFAULT_STROKE ? textColor : stroke, groupIds: [groupId] }));
         if (item.id) byId.set(String(item.id), { box: b, containerId: null });
         continue;
@@ -682,8 +696,17 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
         const ab = anchorBox(item);
         const near = !!item.near;
         const s = 22;
-        const x = near ? ab.maxX + 10 : (ab.minX + ab.maxX) / 2 - s / 2;
-        const y = near ? ab.minY - s / 2 : (ab.minY + ab.maxY) / 2 - s / 2;
+        const nearId = near ? String(item.near) : null;
+        const prev = nearId ? markBoxes.get(nearId) : null;
+        // beside the top-right corner; further marks on the same shape line up to the right of earlier ones
+        let x = near ? (prev ? prev.maxX + 8 : ab.maxX + 10) : (ab.minX + ab.maxX) / 2 - s / 2;
+        let y = near ? ab.minY - s / 2 : (ab.minY + ab.maxY) / 2 - s / 2;
+        if (near && bracketZones.some((z) => overlaps(z, { minX: x - 4, minY: y - 4, maxX: x + s + 4, maxY: y + s + 4 }))) {
+          // a brace already runs down that side: sit on the top edge instead
+          x = (prev && prev.maxY <= ab.minY ? prev.minX - s - 8 : ab.maxX - s - 6);
+          y = ab.minY - s - 10;
+        }
+        if (nearId) markBoxes.set(nearId, union(prev || { minX: x - 4, minY: y - 4, maxX: x + s + 4, maxY: y + s + 4 }, { minX: x - 4, minY: y - 4, maxX: x + s + 4, maxY: y + s + 4 }));
         const ms = { roughness: 0, strokeWidth: 3, groupIds: [groupId] };
         if (shape === "check" || shape === "tick") push(lineSkel([[x, y + s * 0.55], [x + s * 0.35, y + s * 0.9], [x + s, y]], { ...ms, strokeColor: ink ? INK_COLOR : COLORS.green[0] }));
         else if (shape === "cross") {

@@ -298,8 +298,10 @@ export function renderInk({ commands, regions, elementsById, userStrokeSize, use
       const spot = place(t.width, t.height, g.anchor, [...out, ...placed]);
       t = { ...t, x: spot.x, y: spot.y, groupIds: [groupId], customData };
       placed.push(t);
-      if (g.leader || (g.texts.length > 1 && !isWrite)) {
-        const nb = { minX: t.x, minY: t.y, maxX: t.x + t.width, maxY: t.y + t.height };
+      const nb = { minX: t.x, minY: t.y, maxX: t.x + t.width, maxY: t.y + t.height };
+      // a note that had to move away from its mark (e.g. the card took the free space beside it) gets a leader too
+      const gap = Math.hypot(Math.max(0, g.anchor.minX - nb.maxX, nb.minX - g.anchor.maxX), Math.max(0, g.anchor.minY - nb.maxY, nb.minY - g.anchor.maxY));
+      if (g.leader || (g.texts.length > 1 && !isWrite) || (!isWrite && gap > 40 * k)) {
         const acx = (g.anchor.minX + g.anchor.maxX) / 2, acy = (g.anchor.minY + g.anchor.maxY) / 2;
         const from = edgePoint(nb, acx, acy, 6 * k);
         const to = edgePoint(g.anchor, from[0], from[1], 10 * k);
@@ -482,8 +484,11 @@ export function applyEdits({ commands, regions, elementsById }) {
   };
   const skipped = [];
   let done = 0;
+  const newRegions = new Map(); // "id" given to an added shape -> a region later commands can name
   const regionOf = (id) => {
-    const r = regions.find((r) => r.id === String(id || "").trim().toUpperCase());
+    const key = String(id || "").trim();
+    if (newRegions.has(key)) return newRegions.get(key);
+    const r = regions.find((r) => r.id === key.toUpperCase());
     return r && !r.id.startsWith("C") ? r : null; // answer cards are not editable
   };
   const liveMembers = (r) => r.ids.map(cur).filter((e) => e && !e.isDeleted);
@@ -619,6 +624,7 @@ export function applyEdits({ commands, regions, elementsById }) {
           added.push(...placed);
           const newAnchor = placed.find((e) => e.boundElements?.some((b) => b.type === "text") && ["rectangle", "ellipse", "diamond"].includes(e.type)) || placed.find((e) => ["rectangle", "ellipse", "diamond"].includes(e.type));
           const newBox = boundsOf(placed);
+          if (c.id != null && String(c.id).trim()) newRegions.set(String(c.id).trim(), { id: `new:${c.id}`, kind: "shape", ids: placed.map((e) => e.id), bounds: newBox });
           if (between && between[0] && between[1]) {
             const a = anchorOf(between[0]), b = anchorOf(between[1]);
             const old = a && b ? arrowsBetween(a, b) : [];

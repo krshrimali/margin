@@ -318,7 +318,7 @@ async function snapshot(api, elements, maxSide) {
  * the board. Prefers right of the anchor, then below, left, above; slides
  * outward past obstacles until it finds clear space.
  */
-export function findFreeSpot(w, h, anchor, obstacles, GAP = 48) {
+export function findFreeSpot(w, h, anchor, obstacles, GAP = 48, { nearest = false } = {}) {
   const rects = obstacles.map((e) => boundsOf([e]));
   const m = GAP / 2;
   const free = (x, y) =>
@@ -341,7 +341,11 @@ export function findFreeSpot(w, h, anchor, obstacles, GAP = 48) {
   }
   let best = null;
   for (const [x, y, pen] of cands) {
-    const cost = Math.hypot(x - bx, y - ay) + pen;
+    // nearest: rank by the gap between the spot and the anchor (any side), for notes that label a mark;
+    // otherwise by distance from the anchor's top-right corner, which favours reading order for cards
+    const cost = nearest
+      ? Math.hypot(Math.max(0, ax - (x + w), x - bx), Math.max(0, ay - (y + h), y - by)) + pen * 0.5
+      : Math.hypot(x - bx, y - ay) + pen;
     if ((!best || cost < best.cost) && free(x, y)) best = { x, y, cost };
   }
   if (best) return best;
@@ -1101,7 +1105,7 @@ export async function askClaude(api, {
           const hw = regions.filter((r) => r.kind === "handwriting/sketch").map((r) => r.bounds.maxY - r.bounds.minY).filter((x) => x < 200).sort((a, b) => a - b);
           return hw.length ? hw[Math.floor(hw.length / 2)] * 0.55 : 20;
         })(),
-        place: (wd, ht, near, extra) => findFreeSpot(wd, ht, near, [...now, ...block, ...extra], 28),
+        place: (wd, ht, near, extra) => findFreeSpot(wd, ht, near, [...now, ...block, ...extra], 28, { nearest: true }),
         groupId: rid(),
         meta: { askId: data.id, askedAt, ...(thread ? { threadId: thread.id } : {}) },
         seed: askedAt,
