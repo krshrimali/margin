@@ -1,6 +1,6 @@
 ---
 name: board-diagrams
-description: How to draw on the Margin whiteboard — flowcharts (Mermaid <diagram>) and freeform visual explanations (<draw> with shapes, braces, tables, colours) — so they come out clear, well laid out and good-looking. Use whenever you are about to write a <diagram> or <draw> block, or when the user asks you to "draw", "sketch", "diagram", "visualise", "explain with a picture", "show the flow" or to research something and draw it.
+description: How to draw on the Margin whiteboard — flowcharts (Mermaid <diagram>) and freeform visual explanations (<draw> with shapes, braces/brackets/parens, tables, colours) — so they come out clear, well laid out and good-looking. Use whenever you are about to write a <diagram> or <draw> block, or when the user asks you to "draw", "sketch", "diagram", "visualise", "explain with a picture", "show the flow" or to research something and draw it.
 ---
 
 # Drawing on the board
@@ -39,10 +39,17 @@ keep the card to the key takeaways, and end the card with `Sources: domain.com, 
    "Cache misses hit the database" beats "Caching".
 2. **Shape = kind of thing.** Pick the shape by meaning (tables below) and use it consistently: all databases are
    cylinders, all people are `person`, all external services are clouds. Viewers decode shapes before reading.
-3. **Colour = category or emphasis, never decoration.** At most 3–4 colours in one drawing, roughly 60/30/10:
-   most shapes neutral or one main hue, a secondary hue for a second category, one accent for the thing that
-   matters. Meaning must also be in the words (colour alone isn't enough); add a small legend note if you use
-   colour to encode categories.
+   Use the whole vocabulary: a drawing that is only `rect`s throws that signal away. Before emitting, check each
+   rect — is it really a database, a document, a queue, a screen, a stage, a decision, a person?
+3. **Colour = category.** Give every *kind* of thing its own hue so the picture reads before the labels do:
+   people one colour, your components another, data another, external things grey, the problem red, the fix
+   green. A drawing with several kinds of things should use **3–5 colours plus grey**. Drawing everything in one
+   colour (or all black outlines) is a mistake unless you deliberately chose `"style":"ink"` for a quick sketch.
+   Keep it systematic: same kind → same colour, and one accent (red / bold) for the thing that matters. Meaning
+   must also be in the words; add a small legend (`text` or `note`) when colours encode categories. Colour
+   braces, groups and arrows too — a brace takes the colour of the items it summarises; an arrow on the
+   failure path is red. (If you give no colours at all, the app colours shapes by kind as a fallback — but
+   choosing them yourself by meaning is better.)
 4. **Semantic colours** (match the user's expectations):
    - `red` — errors, risks, the bottleneck, "wrong". Never for ordinary items.
    - `green` — success, done, healthy, "new / added", the recommended option.
@@ -61,7 +68,10 @@ keep the card to the key takeaways, and end the card with `Sources: domain.com, 
 8. **Labels: 1–4 words, in the user's terms.** Numbers and specifics in labels ("3 retries", "~95% hit"). Arrow
    labels ≤ 3 words. Use `\n` for a deliberate second line.
 9. **Group, then summarise.** A `group` box around related shapes names a boundary ("VPC", "Frontend"). A `brace`
-   beside several items summarises them ("one round trip", "Phase 1"). A `bracket` is a lighter version.
+   beside several items summarises them ("one round trip", "Phase 1"). A `bracket` is a lighter version; a
+   `paren` reads as an aside or optional part; a pair (`"side":"both"`) encloses items as one value — `{ }` a
+   set, `[ ]` a list/array, `( )` a tuple, `⟨ ⟩` a vector. Reach for braces whenever you'd write "these N
+   things are …".
 10. **Point at the insight.** Finish with one annotation that carries the message: a `note`, a `brace` with
     text, a `warning` mark on the risk, a `check` on the recommendation, or numbered `number` badges for steps.
 
@@ -109,6 +119,11 @@ monochrome).
 | `ellipse` / `circle` | oval / circle | an event, a concept in a concept map, a hub, a state |
 | `note` | sticky note (yellow) | an assumption, a tip, a side remark, a number to remember |
 | `callout` | speech bubble | what someone says / asks, a quote, a UI message |
+| `window` | app window with title bar | a UI screen, web page, app, dashboard (aliases `browser`, `screen`) |
+| `chevron` | arrow-shaped box | a stage in a pipeline / process row: put them side by side, no arrows needed |
+| `blockarrow` | big fat arrow with text | "leads to", "becomes", a transformation between two halves of a picture |
+| `triangle` | triangle | a hierarchy level, a pyramid (stack `w`-growing triangles/trapezoids), a warning |
+| `octagon` | stop sign | stop, blocked, a hard limit, a forbidden path |
 
 Keys: `id` (to connect it), `text`, `at`, `color` (name or `#hex`), `fill:"none"` for an outline only,
 `"bold":true`, `"dashed":true` (planned / optional / new), `"w"` / `"h"` in cells to resize, `"size":"s|m|l|xl"`
@@ -125,13 +140,26 @@ without direction. One arrow per pair of shapes.
 
 | item | keys | use |
 |---|---|---|
-| `brace` | `around:[ids]`, `side:"left|right|top|bottom"`, `text` | curly brace summarising a range: phases, "these 3 are the read path" |
-| `bracket` | same | square bracket, a lighter grouping |
+| `brace` | `around:[ids]`, `side:"left|right|top|bottom|both"`, `text` | curly brace `{` summarising a range: phases, "these 3 are the read path" |
+| `bracket` | same | square bracket `[`, a lighter grouping; a pair = a list / array |
+| `paren` | same | round bracket `(`, an aside, optional part; a pair = a tuple / grouping in a formula |
+| `angle` | same | angle bracket `⟨`, a pair = a vector, a tag, a generic `<T>` |
 | `group` | `around:[ids]`, `text`, `color` | dashed boundary box with a title: a system, a team, a network zone |
 | `text` / `title` | `text`, `at`, `size`, `align`, `color` | free text, headings, axis labels, a legend |
 | `table` | `rows:[[…],[…]]`, `at`, `color` | comparisons; first row is the header |
 | `check` / `cross` / `star` / `warning` | `near:id` or `at` | verdicts on a shape: right, wrong, recommended, risky |
 | `number` | `text:"1"`, `near:id` | numbered steps on an architecture: 1 → 2 → 3 |
+
+All four brackets take the same placement keys: `around:[ids]` (span those items), `from:[c,r],to:[c,r]` (span
+grid cells), or standalone `at:[c,r]` with `span` (length in cells). `side:"both"` draws a matching pair, one on
+each side, enclosing the items. `text` goes at the tip; `color`, `bold`, `dashed` work as on shapes.
+
+```
+{"shape":"brace","around":["a","b","c"],"side":"right","text":"read path","color":"blue"}
+{"shape":"bracket","around":["x","y","z"],"side":"both"}
+{"shape":"paren","around":["opt"],"side":"left","text":"optional","color":"grey","dashed":true}
+{"shape":"brace","at":[3,1],"span":2,"side":"right","text":"Phase 2","color":"green"}
+```
 
 ## 4. Layout recipes for `<draw>`
 
@@ -146,6 +174,10 @@ without direction. One arrow per pair of shapes.
 - **Concept map**: the central idea as a bold `ellipse` in the middle, related ideas around it, labelled lines.
 - **Before / after**: two groups side by side (`group` "Before", grey; `group` "After", green), with a `cross`
   on the problem and a `check` on the fix.
+- **Pipeline / stages**: `chevron`s in one row (`at:[0,0] … [n,0]`, no arrows), each stage its own colour or a
+  colour per phase, a `brace` under each phase.
+- **Hierarchy / pyramid**: `triangle` on top, then `trapezoid`s growing with `w` below it, one colour per level.
+- **Set / data structure**: items in a row with a `brace` or `bracket` pair (`side:"both"`) around them.
 - **Explaining one thing**: the thing in the middle, `callout` / `note` items around it naming its parts, with
   arrows from the notes to it.
 
@@ -190,9 +222,11 @@ Flowchart node shapes — all of these are drawn as real shapes on the board:
 Edges: `-->` arrow, `-->|label|` labelled, `-.->` dashed (async, optional), `==>` thick (main path), `---` line,
 `<-->` two-way.
 
-**Colour**: without any `classDef`/`style` colours, the diagram is drawn in your violet ink (good for corrections
-and quick sketches). With `classDef name fill:#hex,stroke:#hex` (hex colours only), the colours are kept, so use
-them with the same semantic palette as above. Good pairs (stroke / fill): red `#e03131`/`#ffc9c9`, green
+**Colour**: without any `classDef`/`style` colours, the whole diagram is drawn in one violet ink — fine for a
+quick correction, wrong for anything the user asked you to draw. Normally define 3–5 classes by category and
+assign every node to one (`class A,B svc`). With `classDef name fill:#hex,stroke:#hex` (hex colours only), the
+colours are kept, so use them with the same semantic palette as above. Also use the node shapes (table below):
+databases `[( )]`, config `{{ }}`, I/O `[/ /]`, start/end `([ ])` — not `[ ]` for everything. Good pairs (stroke / fill): red `#e03131`/`#ffc9c9`, green
 `#2f9e44`/`#b2f2bb`, blue `#1971c2`/`#a5d8ff`, yellow `#f08c00`/`#ffec99`, violet `#6741d9`/`#d0bfff`,
 orange `#e8590c`/`#ffd8a8`, teal `#099268`/`#96f2d7`, grey `#495057`/`#e9ecef`. `stroke-dasharray: 6 4` and
 `stroke-width: 4px` also survive; say in the card what dashed or thick means.
@@ -257,7 +291,9 @@ pointing at. Use the user's own terms from the board ("Ingest", "Ranker", "Kafka
 1. Is a picture better than words or ink here? `<diagram>` or `<draw>`?
 2. Title states the idea. 5–12 shapes. One bold focal item.
 3. Every shape chosen for its meaning; same kind → same shape.
-4. ≤ 4 colours, semantic, red only for problems; meaning also in the words.
+4. Colour by category: 3–5 hues plus grey (not one colour for everything), same kind → same colour, red only
+   for problems; meaning also in the words. Mermaid: `classDef`s present.
+4b. Shapes: no plain `rect` where a more specific shape fits; a brace / bracket where you group "these N things".
 5. Reading order: left→right or top→bottom; items written in that order.
 6. Labels ≤ 4 words in the user's terms; arrow labels ≤ 3 words.
 7. One annotation (brace / note / check / warning / numbers) carrying the key message.

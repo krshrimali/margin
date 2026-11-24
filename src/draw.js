@@ -112,6 +112,27 @@ const OUTLINES = {
     const t = Math.min(26, h * 0.4);
     return [{ pts: close([[0, 0], [w, 0], [w, h], [w * 0.36, h], [w * 0.18, h + t], [w * 0.22, h], [0, h]]) }];
   },
+  triangle: (w, h) => [{ pts: close([[w / 2, 0], [w, h], [0, h]]) }],
+  chevron: (w, h) => {
+    const s = Math.min(w * 0.18, h * 0.5);
+    return [{ pts: close([[0, 0], [w - s, 0], [w, h / 2], [w - s, h], [0, h], [s, h / 2]]) }];
+  },
+  octagon: (w, h) => {
+    const c = Math.min(w, h) * 0.29;
+    return [{ pts: close([[c, 0], [w - c, 0], [w, c], [w, h - c], [w - c, h], [c, h], [0, h - c], [0, c]]) }];
+  },
+  blockarrow: (w, h) => {
+    const hd = Math.min(w * 0.3, h * 0.8);
+    return [{ pts: close([[0, h * 0.25], [w - hd, h * 0.25], [w - hd, 0], [w, h / 2], [w - hd, h], [w - hd, h * 0.75], [0, h * 0.75]]) }];
+  },
+  window: (w, h) => {
+    const bar = 22;
+    return [
+      { pts: close([[0, 0], [w, 0], [w, h], [0, h]]) },
+      { pts: [[0, bar], [w, bar]], open: true },
+      { ellipse: [8, 7, 8, 8] }, { ellipse: [21, 7, 8, 8] }, { ellipse: [34, 7, 8, 8] },
+    ];
+  },
   subroutine: (w, h) => {
     const s = Math.min(12, w * 0.07);
     return [{ pts: close([[0, 0], [w, 0], [w, h], [0, h]]) }, { pts: [[s, 0], [s, h]], open: true }, { pts: [[w - s, 0], [w - s, h]], open: true }];
@@ -131,7 +152,20 @@ const NATIVE = {
   diamond: { type: "diamond" },
   decision: { type: "diamond" },
 };
-const ALIASES = { stadium: "pill", terminal: "pill", terminator: "pill", start: "pill", end: "pill", database: "cylinder", db: "cylinder", storage: "cylinder", sticky: "note", bubble: "callout", speech: "callout", io: "parallelogram", input: "parallelogram", output: "parallelogram", data: "parallelogram", doc: "document", prep: "hexagon", preparation: "hexagon", actor: "person", user: "person", internet: "cloud", external: "cloud", "curly-brace": "brace", curly: "brace", heading: "title", label: "text", frame: "group", container: "group" };
+const ALIASES = { stadium: "pill", terminal: "pill", terminator: "pill", start: "pill", end: "pill", database: "cylinder", db: "cylinder", storage: "cylinder", sticky: "note", bubble: "callout", speech: "callout", io: "parallelogram", input: "parallelogram", output: "parallelogram", data: "parallelogram", doc: "document", prep: "hexagon", preparation: "hexagon", actor: "person", user: "person", internet: "cloud", external: "cloud", "curly-brace": "brace", curly: "brace", heading: "title", label: "text", frame: "group", container: "group",
+  pyramid: "triangle", stage: "chevron", step: "chevron", stop: "octagon", bigarrow: "blockarrow", "block-arrow": "blockarrow", fatarrow: "blockarrow",
+  browser: "window", screen: "window", ui: "window", page: "window",
+  "square-bracket": "bracket", parenthesis: "paren", parens: "paren", parentheses: "paren", round: "paren", "angle-bracket": "angle", chevrons: "angle" };
+const BRACKETS = new Set(["brace", "bracket", "paren", "angle"]);
+
+// When a drawing names no colours at all, give each kind of thing its own hue so it
+// doesn't come out monochrome (shape = kind, colour = category).
+const SHAPE_COLOR = {
+  person: "violet", cloud: "blue", cylinder: "teal", queue: "cyan", document: "grey", note: "yellow", callout: "yellow",
+  diamond: "orange", decision: "orange", hexagon: "pink", pill: "green", parallelogram: "cyan", subroutine: "blue",
+  rect: "blue", rectangle: "blue", box: "blue", process: "blue", rounded: "blue", window: "grey", trapezoid: "orange",
+  ellipse: "violet", oval: "violet", circle: "violet", chevron: "blue", blockarrow: "green", octagon: "red", triangle: "orange",
+};
 
 const SHAPES_WITH_TEXT = new Set([...Object.keys(NATIVE), ...Object.keys(OUTLINES), "person"]);
 const MARKS = new Set(["check", "tick", "cross", "star", "warning", "number"]);
@@ -218,6 +252,11 @@ function shapeSize(item, shape, fontSize) {
   if (shape === "note") { w = Math.max(w, 150); h = Math.max(h, 110); }
   if (shape === "callout") h += 6;
   if (shape === "pill") w += 20;
+  if (shape === "triangle") { w *= 1.5; h = Math.max(h * 1.6, 100); }
+  if (shape === "chevron") w += 40;
+  if (shape === "octagon") { w += 20; h = Math.max(h + 16, 80); }
+  if (shape === "blockarrow") { w += 50; h = Math.max(h * 1.7, 90); }
+  if (shape === "window") { h += 24; w = Math.max(w, 150); }
   if (shape === "circle") w = h = Math.max(w * 0.8, h, 90);
   if (item.w) w = Math.max(40, Number(item.w) * CELL_W);
   if (item.h) h = Math.max(30, Number(item.h) * CELL_H);
@@ -266,6 +305,37 @@ function bracketPoints(b, side, depth = 12) {
   const sgn = side === "left" || side === "top" ? -1 : 1;
   const map = ([v, u]) => (vertical ? [base + sgn * v, u] : [u, base + sgn * v]);
   return { pts: [[0, u0], [depth, u0], [depth, u1], [0, u1]].map(map), tip: map([depth + 10, (u0 + u1) / 2]), side };
+}
+
+/** Round bracket "(" / ")" along one side of box b. */
+function parenPoints(b, side, depth = 12) {
+  const vertical = side === "left" || side === "right";
+  const u0 = vertical ? b.minY : b.minX, u1 = vertical ? b.maxY : b.maxX;
+  const d = Math.min(depth, (u1 - u0) / 3);
+  const base = { right: b.maxX + 8, left: b.minX - 8, bottom: b.maxY + 8, top: b.minY - 8 }[side];
+  const sgn = side === "left" || side === "top" ? -1 : 1;
+  const map = ([v, u]) => (vertical ? [base + sgn * v, u] : [u, base + sgn * v]);
+  return { pts: quadPts([0, u0], [2 * d, (u0 + u1) / 2], [0, u1], 16).map(map), tip: map([d + 12, (u0 + u1) / 2]), side };
+}
+
+/** Angle bracket "<" / ">" along one side of box b. */
+function anglePoints(b, side, depth = 14) {
+  const vertical = side === "left" || side === "right";
+  const u0 = vertical ? b.minY : b.minX, u1 = vertical ? b.maxY : b.maxX;
+  const d = Math.min(depth, (u1 - u0) / 3);
+  const base = { right: b.maxX + 8, left: b.minX - 8, bottom: b.maxY + 8, top: b.minY - 8 }[side];
+  const sgn = side === "left" || side === "top" ? -1 : 1;
+  const map = ([v, u]) => (vertical ? [base + sgn * v, u] : [u, base + sgn * v]);
+  return { pts: [[0, u0], [d, (u0 + u1) / 2], [0, u1]].map(map), tip: map([d + 10, (u0 + u1) / 2]), side };
+}
+
+function bracketMark(kind, b, side, depth) {
+  const span = side === "left" || side === "right" ? b.maxY - b.minY : b.maxX - b.minX;
+  const d = depth || Math.max(12, Math.min(26, span * 0.07));
+  if (kind === "brace") return bracePoints(b, side, d);
+  if (kind === "paren") return parenPoints(b, side, d);
+  if (kind === "angle") return anglePoints(b, side, d);
+  return bracketPoints(b, side, Math.min(d, 16));
 }
 
 /** A line element from absolute points. */
@@ -366,6 +436,9 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
     return { minX: cx - 1, minY: cy - 1, maxX: cx + 1, maxY: cy + 1 };
   };
 
+  const anyColour = items.some((i) => i && i.shape && (i.color || i.fill || i.stroke));
+  const autoColour = !ink && !anyColour && opts.autoColor !== false;
+
   for (const raw of items) {
     if (!raw || typeof raw !== "object") continue;
     if (!raw.shape) {
@@ -379,6 +452,7 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
     let shape = String(raw.shape).toLowerCase().trim();
     shape = ALIASES[shape] || shape;
     const item = { ...raw, shape };
+    if (autoColour && SHAPE_COLOR[shape]) item.color = SHAPE_COLOR[shape];
     const step = [];
     steps.push(step);
     const push = (skel, where = front) => {
@@ -447,6 +521,8 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
           cylinder: [6, 26, 6, 10], queue: [10, 4, 30, 4], document: [6, 4, 6, h * 0.16], hexagon: [w * 0.14, 2, w * 0.14, 2],
           parallelogram: [w * 0.14, 2, w * 0.14, 2], trapezoid: [w * 0.14, 2, w * 0.14, 2], cloud: [w * 0.14, h * 0.16, w * 0.14, h * 0.16],
           note: [6, 6, 12, 14], subroutine: [12, 2, 12, 2], callout: [4, 4, 4, 4],
+          triangle: [w * 0.24, h * 0.42, w * 0.24, 4], chevron: [w * 0.16, 2, w * 0.16, 2], octagon: [w * 0.1, h * 0.12, w * 0.1, h * 0.12],
+          blockarrow: [6, h * 0.26, Math.min(w * 0.3, h * 0.8) * 0.6, h * 0.26], window: [4, 24, 4, 4],
         }[shape] || [4, 4, 4, 4];
         const id = push({
           type: "rectangle", x: x + inset[0], y: y + inset[1], width: w - inset[0] - inset[2], height: h - inset[1] - inset[3],
@@ -506,18 +582,33 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
       }
 
       // ---------- braces, brackets, groups
-      if (shape === "brace" || shape === "bracket") {
+      if (BRACKETS.has(shape)) {
         const boxes = boxesOf(item.around || item.targets || []);
         let b = boxes.length ? boxes.reduce(union) : null;
         if (!b && item.from && item.to) {
           const [x0, y0] = cellCentre(item.from), [x1, y1] = cellCentre(item.to);
           b = { minX: Math.min(x0, x1), minY: Math.min(y0, y1), maxX: Math.max(x0, x1), maxY: Math.max(y0, y1) };
         }
+        if (!b && Array.isArray(item.at)) {
+          // standalone: centred on a cell, "span" cells long (vertical unless side is top/bottom)
+          const [cx, cy] = cellCentre(item.at);
+          const span = Math.max(0.3, Number(item.span) || 1);
+          const horiz = item.side === "top" || item.side === "bottom";
+          const half = horiz ? (span * CELL_W * 0.8) / 2 : (span * CELL_H * 0.8) / 2;
+          b = horiz ? { minX: cx - half, maxX: cx + half, minY: cy - 8, maxY: cy - 8 } : { minX: cx - 8, maxX: cx - 8, minY: cy - half, maxY: cy + half };
+        }
         if (!b) continue;
-        const side = ["left", "right", "top", "bottom"].includes(item.side) ? item.side : b.maxX - b.minX > (b.maxY - b.minY) * 1.6 ? "bottom" : "right";
-        const g = shape === "brace" ? bracePoints(b, side, item.depth || 16) : bracketPoints(b, side);
-        push(lineSkel(g.pts, { strokeColor: stroke, roughness: 0, strokeWidth: 2, groupIds: [groupId] }));
+        const sideRaw = String(item.side || "").toLowerCase();
+        const pair = ["both", "pair", "around", "enclose", "left-right", "top-bottom"].includes(sideRaw) || item.pair === true;
+        const side = ["left", "right", "top", "bottom"].includes(sideRaw) ? sideRaw : sideRaw === "top-bottom" ? "bottom" : pair ? "right" : b.maxX - b.minX > (b.maxY - b.minY) * 1.6 ? "bottom" : "right";
+        const opposite = { left: "right", right: "left", top: "bottom", bottom: "top" }[side];
+        const sw = item.bold || item.thick ? 3.5 : 2;
+        const ls = { strokeColor: stroke, roughness: 0, strokeWidth: sw, strokeStyle: item.dashed ? "dashed" : "solid", groupIds: [groupId] };
+        const g = bracketMark(shape, b, side, Number(item.depth) || 0);
+        if (pair) push(lineSkel(bracketMark(shape, b, opposite, Number(item.depth) || 0).pts, ls));
+        push(lineSkel(g.pts, ls));
         if (item.text) push(sideText(wrapText(item.text, 26), g.tip, side, { fontSize: fontSizeOf(item, 18), fontFamily: font, strokeColor: ink ? INK_COLOR : stroke === DEFAULT_STROKE ? textColor : stroke, groupIds: [groupId] }));
+        if (item.id) byId.set(String(item.id), { box: b, containerId: null });
         continue;
       }
       if (shape === "group") {

@@ -47,7 +47,7 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   Under the button you see what Claude is doing ("Picking relevant context…", "Reading src/log.rs…"), a timer
   and a ✕ to cancel. Claude adds an editable suggested diagram only when you're designing a flow or system.
 - **Claude's ink.** Claude can also mark up your drawing with a pen in its own violet, like a teacher marking a page:
-  circles, underlines, ✓ and ✗, strike-throughs, brackets, missing arrows (looped around the side) and short
+  circles, underlines, ✓ and ✗, strike-throughs, brackets, braces, parens and angle brackets (on either side or as an enclosing pair), missing arrows (looped around the side) and short
   handwritten notes. To make this precise, the server sends Claude a third snapshot where your content is grouped
   into labelled regions (R1, R2… for your content, D1, D2… for the shapes of its diagrams, C1… for its cards). Claude refers to those labels, and the app
   draws the strokes with the same pen engine you use. Notes go in free space; marks sit on your content but on
@@ -78,7 +78,7 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
 - **Drawing.** Besides Mermaid diagrams (`<diagram>`), Claude can draw freeform with shapes (`<draw>`, see
   `src/draw.js`): rectangles, rounded boxes, pills, ellipses, circles, diamonds, parallelograms, cylinders
   (databases), documents, hexagons, subroutines, trapezoids, queues, clouds, people, sticky notes, speech bubbles,
-  curly braces, square brackets, dashed group boxes, tables, ticks, crosses, stars, warnings and numbered badges,
+  curly braces, square, round and angle brackets (single, paired or standalone), dashed group boxes, tables, ticks, crosses, stars, warnings and numbered badges,
   joined by straight, curved or elbow arrows that stay attached when you move things. Shapes are placed on a grid
   whose columns and rows grow to fit their labels and arrow labels. Colours come from Excalidraw's palette. Mermaid
   nodes like `[(DB)]`, `{{prep}}`, `[/io/]`, `[[sub]]` now get their real shapes too, and diagrams keep the colours
@@ -119,9 +119,11 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   answer are a single undo step (Ctrl+Z).
 - **Diagram skill.** Claude is started with `--plugin-dir agent-plugin`, which gives it the `board-diagrams` skill
   (`agent-plugin/skills/board-diagrams/SKILL.md`). It loads the skill before drawing: when to use `<draw>` or
-  `<diagram>`, which shape means what (standard flowchart conventions plus architecture shapes), a semantic colour
-  palette (3–4 colours, red only for problems), design rules (one idea per drawing, hierarchy, reading order),
-  layout recipes (architecture, comparison, timeline, stack, cycle, before/after) and templates. Codex doesn't load
+  `<diagram>`, which shape means what (standard flowchart conventions plus architecture shapes, UI windows,
+  chevron stages, block arrows, triangles, octagons), braces / brackets / parens / angle brackets (single, paired
+  or standalone), colour by category (3–5 hues plus grey, red only for problems; a drawing with no colours is
+  coloured by shape kind automatically), design rules (one idea per drawing, hierarchy, reading order),
+  layout recipes (architecture, comparison, timeline, stack, cycle, pipeline, pyramid, before/after) and templates. Codex doesn't load
   it, but gets the shape reference in its prompt.
 - **Project folder** (in the ▾ menu, saved per board): the folder Claude works in when your board refers to code.
 - Claude runs as `claude -p --dangerously-skip-permissions` (headless, all tools allowed).

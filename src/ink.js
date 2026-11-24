@@ -13,6 +13,9 @@ import { convertToExcalidrawElements, getCommonBounds, FONT_FAMILY, CaptureUpdat
 import { makeFreedraw, penDescriptor, PRESETS } from "./pens.js";
 import { buildDrawing, exitPoint } from "./draw.js";
 
+// ink bracket commands -> mark kind
+const INK_BRACKETS = { bracket: "bracket", "square-bracket": "bracket", brace: "brace", curly: "brace", paren: "paren", parens: "paren", parenthesis: "paren", round: "paren", angle: "angle", "angle-bracket": "angle" };
+
 export const INK_COLOR = "#7048e8";
 const MARK_COLOR = "#f76707";
 
@@ -369,22 +372,31 @@ export function renderInk({ commands, regions, elementsById, userStrokeSize, use
         const x = b.maxX + 14 * k, y = midY - 9 * k, s = 18 * k;
         stroke(densify([[x, y], [x + s, y + s]], 2 * k, 0.5 * k, rnd));
         stroke(densify([[x + s, y], [x, y + s]], 2 * k, 0.5 * k, rnd));
-      } else if (act === "bracket") {
-        const x = b.maxX + 16 * k;
-        stroke(densify([[x - 9 * k, b.minY - 4 * k], [x, b.minY], [x, b.maxY], [x - 9 * k, b.maxY + 4 * k]], 3 * k, 0.5 * k, rnd));
-      } else if (act === "brace" || act === "curly") {
-        // a curly brace down the right side, tip pointing away from the content
-        const x = b.maxX + 12 * k, y0 = b.minY - 2 * k, y1 = b.maxY + 2 * k, ym = (y0 + y1) / 2;
+      } else if (INK_BRACKETS[act]) {
+        // drawn down the right side (tip pointing away from the content); "side":"left" mirrors it,
+        // "side":"both" draws a matching pair enclosing the targets
+        const kind = INK_BRACKETS[act];
+        const x = b.maxX + 12 * k, y0 = b.minY - 3 * k, y1 = b.maxY + 3 * k, ym = (y0 + y1) / 2;
         const d = Math.min(12 * k, (y1 - y0) / 4);
-        stroke(densify([
-          ...quad([x, y0], [x + d, y0], [x + d, y0 + d], 8),
-          ...quad([x + d, ym - d], [x + d, ym], [x + 2 * d, ym], 8),
-          ...quad([x + 2 * d, ym], [x + d, ym], [x + d, ym + d], 8).slice(1),
-          ...quad([x + d, y1 - d], [x + d, y1], [x, y1], 8),
-        ], 2.5 * k, 0.4 * k, rnd));
+        const pts = {
+          bracket: () => [[x, y0], [x + 9 * k, y0 - k], [x + 9 * k, y1 + k], [x, y1]],
+          brace: () => [
+            ...quad([x, y0], [x + d, y0], [x + d, y0 + d], 8),
+            ...quad([x + d, ym - d], [x + d, ym], [x + 2 * d, ym], 8),
+            ...quad([x + 2 * d, ym], [x + d, ym], [x + d, ym + d], 8).slice(1),
+            ...quad([x + d, y1 - d], [x + d, y1], [x, y1], 8),
+          ],
+          paren: () => quad([x, y0], [x + 2.2 * d, ym], [x, y1], 16),
+          angle: () => [[x, y0], [x + 1.4 * d, ym], [x, y1]],
+        }[kind]();
+        const side = String(c.side || "right").toLowerCase();
+        const mirror = (q) => q.map(([px, py]) => [b.minX + b.maxX - px, py]);
+        const width = kind === "brace" ? 2.5 : 3;
+        if (side !== "left") stroke(densify(pts, width * k, 0.4 * k, rnd));
+        if (side === "left" || side === "both" || side === "pair") stroke(densify(mirror(pts), width * k, 0.4 * k, rnd));
       } else continue;
       if (label) {
-        const markOnly = ["check", "tick", "cross", "wrong", "bracket", "brace", "curly"].includes(act);
+        const markOnly = ["check", "tick", "cross", "wrong"].includes(act) || !!INK_BRACKETS[act];
         const drawn = out.slice(before);
         const key = Array.isArray(c.targets) ? `T:${c.targets.join(",")}` : keyOf(c.target);
         note(label, markOnly && drawn.length ? boundsOf(drawn) : b, !markOnly, key);
