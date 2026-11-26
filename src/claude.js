@@ -8,7 +8,7 @@ import {
   FONT_FAMILY,
   ROUNDNESS,
 } from "@excalidraw/excalidraw";
-import { regionsFor, markElements, renderInk, applyEdits, describeEdits, INK_COLOR } from "./ink.js";
+import { regionsFor, markElements, renderInk, applyEdits, describeEdits } from "./ink.js";
 import { buildDrawing, outlineSkeletons } from "./draw.js";
 import { startWalkthrough } from "./steps.js";
 
@@ -63,6 +63,7 @@ const isClaude = (el) => !!el.customData?.claude || isPending(el);
 function cardTextOf(el, byId) {
   if (!el.customData?.claude) return null;
   if (el.customData.role === "text") return el.text;
+  if (el.customData.contextText) return el.customData.contextText;
   if (!el.customData.role && el.type === "rectangle" && el.backgroundColor === CARD_BG) {
     const b = el.boundElements?.find((b) => b.type === "text");
     return b ? byId.get(b.id)?.text ?? null : null;
@@ -533,19 +534,24 @@ function decorateShapes(skeletons, shapes) {
   return out;
 }
 
-async function diagramElements(mermaid, { quick = false } = {}) {
+async function diagramElements(mermaid, { width = 1000, height = 700 } = {}) {
   const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
   const src = mermaid.trim();
   const flat = shortenEdgeLabels(flattenSubgraphs(src));
-  const variants = quick ? [src] : [src, shortenEdgeLabels(src), flat, setDirection(flat, "TD"), setDirection(flat, "LR")];
+  const variants = [src, setDirection(src, "TD"), setDirection(src, "LR"), shortenEdgeLabels(src), flat, setDirection(flat, "TD"), setDirection(flat, "LR")];
   const shapes = mermaidNodeShapes(src);
   let best = null;
   for (const v of [...new Set(variants)]) {
     try {
       const { elements, files } = await parseMermaidToExcalidraw(v, { themeVariables: { fontSize: "16px" } });
       const els = convertToExcalidrawElements(decorateShapes(withExcalifont(elements), shapes), { regenerateIds: true });
-      const score = overlapScore(els.filter((e) => e.type !== "line" || e.customData));
-      if (!best || score < best.score) best = { elements: els, files, score, variant: v };
+      if (!validVisual(els)) continue;
+      const b = boundsOf(els);
+      const fit = Math.min(1, Math.max(1, width - 96) / Math.max(1, b.maxX - b.minX),
+        Math.max(1, height - 160) / Math.max(1, b.maxY - b.minY));
+      const overlaps = overlapScore(els.filter((e) => e.type !== "line" || e.customData));
+      const score = overlaps * 10 + Math.max(0, 1 - fit) * 8 + (v === src ? 0 : variants.indexOf(v) <= 2 ? 0.1 : 2);
+      if (!best || score < best.score) best = { elements: els, files, score };
       if (score === 0) break;
     } catch (e) {
       console.warn("mermaid variant failed", e);
@@ -555,12 +561,38 @@ async function diagramElements(mermaid, { quick = false } = {}) {
   return { ...best, styled: isStyled(src) };
 }
 
-// Suggested diagrams are drawn by hand in Claude's ink colour, unless Claude coloured them on purpose.
-const inkStyle = (e) =>
-  e.type === "text"
-    ? { strokeColor: INK_COLOR }
-    : { strokeColor: e.strokeColor === "transparent" ? "transparent" : INK_COLOR, roughness: 1, backgroundColor: "transparent", fillStyle: "solid" };
-const styleDiagram = (e, styled) => (styled ? (e.type === "text" ? {} : { roughness: 1 }) : inkStyle(e));
+function validVisual(elements) {
+  return elements.length > 0 && new Set(elements.map((e) => e.id)).size === elements.length &&
+    elements.every((e) => [e.x, e.y, e.width, e.height].every(Number.isFinite));
+}
+
+function composeVisual(visual, { title, caption, hasTitle }) {
+  const b = boundsOf(visual);
+  const labels = [];
+  if (!hasTitle) {
+    const [heading] = convertToExcalidrawElements([
+      { type: "text", x: b.minX, y: b.minY, text: title, fontSize: 30, fontFamily: FONT_FAMILY.Excalifont, strokeColor: "#1e1e1e" },
+    ]);
+    labels.push({ ...heading, y: b.minY - heading.height - 28 });
+  }
+  const width = Math.max(320, Math.min(720, b.maxX - b.minX));
+  const footer = caption && convertToExcalidrawElements([{
+    type: "rectangle", x: b.minX, y: b.maxY + 22, width, height: 36, strokeColor: "transparent",
+    backgroundColor: "transparent", roughness: 0,
+    label: { text: caption, fontSize: 17, fontFamily: FONT_FAMILY.Nunito, textAlign: "left", verticalAlign: "top", strokeColor: "#495057" },
+  }]);
+  return { elements: [...labels, ...visual, ...(footer || [])], headingIds: labels.map((e) => e.id), captionIds: (footer || []).map((e) => e.id) };
+}
+
+function styleDiagram(e, styled) {
+  if (styled) return e.type === "text" ? {} : { roughness: 1 };
+  if (e.type === "text") return { strokeColor: "#343a40" };
+  return {
+    strokeColor: e.strokeColor === "transparent" ? "transparent" : e.type === "diamond" ? "#6741d9" : "#495057",
+    backgroundColor: e.type === "diamond" ? "#f3efff" : "transparent",
+    roughness: 1, fillStyle: "solid",
+  };
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -768,7 +800,7 @@ function frameOf(e, t) {
  * out and its shapes fade in, one step after another. The caller commits the
  * real elements afterwards.
  */
-async function animateSteps(api, els, steps, { frames = 6, delay = 18 } = {}) {
+async function animateSteps(api, els, steps, { signal, frames = 5, delay = 16 } = {}) {
   const byId = new Map(els.map((e) => [e.id, e]));
   const shown = new Set();
   const ids = new Set(els.map((e) => e.id));
@@ -781,6 +813,7 @@ async function animateSteps(api, els, steps, { frames = 6, delay = 18 } = {}) {
     const stepEls = step.map((id) => byId.get(id)).filter(Boolean);
     if (!stepEls.length) continue;
     for (let f = 1; f <= frames; f++) {
+      if (signal?.aborted) return;
       put(stepEls.map((e) => frameOf(e, f / frames)));
       await sleep(delay);
     }
@@ -793,7 +826,7 @@ async function animateSteps(api, els, steps, { frames = 6, delay = 18 } = {}) {
 // Text is wrapped by measuring it, so the card and ink fonts must be loaded first;
 // otherwise lines are wrapped for a narrower fallback font and overflow the card.
 const fontsReady = () =>
-  Promise.all(["14px Nunito", "17px Nunito", "20px Excalifont", "16px Excalifont"].map((f) => document.fonts.load(f))).catch(() => {});
+  Promise.allSettled(["17px Nunito", "20px Excalifont", "18px Cascadia"].map((f) => document.fonts.load(f)));
 
 const MODEL_NAMES = Object.fromEntries(MODELS.filter(([k]) => k));
 const shortModel = (m) => {
@@ -818,21 +851,22 @@ export async function askClaude(api, {
   const askedAt = Date.now();
   await fontsReady();
   const t = selectTargets(api, thread ? "viewport" : scope, { picks, question, threadIds: thread?.elementIds, excludeAsk });
-  if (!t.context.length && !thread) {
-    api.setToast({ message: "The board is empty — draw something first.", duration: 3000 });
-    return;
-  }
-  if (!t.context.length) t.context = live(api);
-  if (!t.context.length) {
-    reply?.error("The board is empty.");
+  const blank = !t.context.length;
+  if (blank && (thread || !(question.trim() || attachments.length || links.length))) {
+    const message = "The board is empty. Type a question or draw something first.";
+    if (thread) reply?.error(message);
+    else api.setToast({ message, duration: 3000 });
     return;
   }
   const hasFocus = t.focus.length > 0;
   const userContext = t.context.filter((e) => !isClaude(e));
-  const anchor = boundsOf(hasFocus ? t.focus : userContext.length ? userContext : t.context);
+  const view = getVisibleSceneBounds(api.getAppState());
+  const [cx, cy] = [(view[0] + view[2]) / 2, (view[1] + view[3]) / 2];
+  const anchor = blank ? { minX: cx, maxX: cx, minY: cy, maxY: cy }
+    : boundsOf(hasFocus ? t.focus : userContext.length ? userContext : t.context);
   const groups = (t.focusGroups?.length ? t.focusGroups : hasFocus ? [t.focus] : []).slice(0, 5);
   const [image, ...focusImages] = await Promise.all([
-    snapshot(api, t.context, 2200),
+    blank ? document.createElement("canvas").toDataURL("image/png") : snapshot(api, t.context, 2200),
     ...groups.map((g) => snapshot(api, g, groups.length > 1 ? 1200 : 1600)),
   ]);
   const summary = summarize(t.context, new Set(t.focus.map((e) => e.id)));
@@ -853,6 +887,7 @@ export async function askClaude(api, {
   // ---- where things go: a placeholder card (answers) or straight into the thread (comments)
   const pendingGroup = rid();
   let placeholderIds = new Set();
+  let pendingVisualIds = new Set();
   let spot = null;
   if (!thread) {
     let placeholder = cardElements({ header, body: "Claude is looking at your drawing…", groupId: pendingGroup, pending: true });
@@ -865,10 +900,11 @@ export async function askClaude(api, {
   }
 
   let shown = { status: "", answer: "" };
+  let drawing = false;
   let renderTimer = 0;
   const render = () => {
     renderTimer = 0;
-    if (thread) return;
+    if (thread || drawing) return;
     const body = shown.answer || shown.status || "Claude is looking at your drawing…";
     const head = shown.answer && shown.status ? `${header}  ·  ${shown.status}` : header;
     let next = cardElements({ header: head, body, groupId: pendingGroup, pending: true });
@@ -879,67 +915,6 @@ export async function askClaude(api, {
       captureUpdate: CaptureUpdateAction.NEVER,
     });
     placeholderIds = new Set(next.map((e) => e.id));
-  };
-
-  // ---- the visual (Mermaid diagram or freeform drawing), redrawn as it streams in
-  let visualSpot = null; // top-left for the visual in comment mode, chosen once
-  const placeVisual = (els) => {
-    const vb = boundsOf(els);
-    if (!thread) {
-      const card = api.getSceneElements().filter((e) => placeholderIds.has(e.id));
-      const cb = card.length ? boundsOf(card) : { minX: spot.x, maxY: spot.y + 200 };
-      return translate(els, cb.minX - vb.minX, cb.maxY + 56 - vb.minY);
-    }
-    if (!visualSpot) visualSpot = findFreeSpot(Math.max(vb.maxX - vb.minX, 600), Math.max(vb.maxY - vb.minY, 420), anchor, live(api).filter((e) => !partialIds.has(e.id)));
-    return translate(els, visualSpot.x - vb.minX, visualSpot.y - vb.minY);
-  };
-  let partialIds = new Set();
-  let partialEls = [];
-  let visualBusy = false;
-  let visualNext = null;
-  const drawPrefix = `d${rid()}`;
-  const drawPartial = async (job) => {
-    if (visualBusy) {
-      visualNext = job;
-      return;
-    }
-    visualBusy = true;
-    try {
-      let els, newSteps = [];
-      if (job.kind === "diagram") {
-        const { elements, files, styled } = await diagramElements(job.src, { quick: true });
-        if (files) api.addFiles(Object.values(files));
-        els = elements.map((e) => ({ ...e, ...styleDiagram(e, styled) }));
-      } else {
-        const d = buildDrawing(job.items, { prefix: drawPrefix });
-        // keep each element's hand-drawn wobble stable while the drawing grows
-        const seeds = new Map(partialEls.map((e) => [e.id, e.seed]));
-        els = d.elements.map((e) => (seeds.has(e.id) ? { ...e, seed: seeds.get(e.id) } : e));
-        newSteps = d.steps.filter((st) => st.some((id) => !seeds.has(id)));
-      }
-      const placed = placeVisual(els).map((e) => ({ ...e, customData: { claudePending: true, role: "diagram" } }));
-      api.updateScene({
-        elements: [...api.getSceneElementsIncludingDeleted().filter((e) => !partialIds.has(e.id)), ...placed.filter((e) => !newSteps.flat().includes(e.id))],
-        captureUpdate: CaptureUpdateAction.NEVER,
-      });
-      partialIds = new Set(placed.map((e) => e.id));
-      partialEls = placed;
-      if (newSteps.length) await animateSteps(api, placed, [placed.filter((e) => !newSteps.flat().includes(e.id)).map((e) => e.id), ...newSteps], { frames: 5, delay: 16 });
-      if (thread && partialIds.size === placed.length && placed.length) scrollIntoViewIfNeeded(api, placed);
-    } catch {
-      // a half-written diagram may not parse yet; keep the last good one
-    } finally {
-      visualBusy = false;
-      if (visualNext) {
-        const n = visualNext;
-        visualNext = null;
-        drawPartial(n);
-      }
-    }
-  };
-  const settleVisual = async () => {
-    visualNext = null;
-    while (visualBusy) await sleep(20);
   };
 
   const update = (patch) => {
@@ -972,7 +947,6 @@ export async function askClaude(api, {
       throw new Error(err.error || `HTTP ${res.status}`);
     }
     let data = null;
-    let drew = false;
     for await (const ev of ndjson(res)) {
       if (ev.type === "status") update({ status: ev.text });
       else if (ev.type === "context")
@@ -987,9 +961,11 @@ export async function askClaude(api, {
         reply?.usage?.(ev);
       }
       else if (ev.type === "diagram" || ev.type === "draw") {
-        if (!drew) update({ status: "Drawing…" });
-        drew = true;
-        drawPartial(ev.type === "diagram" ? { kind: "diagram", src: ev.mermaid } : { kind: "draw", items: ev.items });
+        if (!drawing) {
+          drawing = true;
+          removeById(api, placeholderIds);
+          update({ status: "Preparing drawing…" });
+        }
       } else if (ev.type === "error") throw new Error(ev.error);
       else if (ev.type === "done") data = ev;
     }
@@ -1001,90 +977,75 @@ export async function askClaude(api, {
     const meta = {
       question: question || "", scope: t.scope, askId: data.id, sessionId: data.sessionId, engine: data.engine || "claude", cwd: data.cwd,
       askedAt, contextIds: data.contextIds, followUpOf: data.followUpOf, model: data.model || "", effort: data.effort || "",
+      modelLabel, durationMs: data.durationMs, costUsd: data.costUsd,
       focusIds: t.focus.filter((e) => !isClaude(e)).slice(0, 300).map((e) => e.id),
       ...(thread ? { threadId: thread.id } : {}),
     };
     const cost = data.costUsd ? ` · $${data.costUsd.toFixed(2)}` : "";
     const used = data.contextIds?.length ? ` · ${data.contextIds.length} earlier` : "";
     const who = [modelLabel, data.effort].filter(Boolean).join(" ");
-    let block = thread
-      ? []
-      : cardElements({
-          header: `${data.engine === "codex" ? header.replace("✦ Claude", "✦ Codex (Claude out of budget)") : header}  (${(data.durationMs / 1000).toFixed(0)}s${cost}${used}${who ? ` · ${who}` : ""})`,
-          body: data.answer || "(empty answer)",
-          groupId,
-          meta,
-        });
-
-    // ---- the final visual: rebuilt from the full source, styled and titled
+    let block = [];
+    let animation = [];
     let visual = [];
-    let visualSteps = [];
-    let visualTitle = "Suggested diagram";
-    let stepOf = {};
     let narration = [];
-    if (data.draw?.length) {
+    if (data.draw?.length || data.diagram) {
+      update({ status: "Verifying drawing layout…" });
+      // Let the status paint before Excalidraw measures and lays out text.
+      await sleep(32);
       try {
-        const d = buildDrawing(data.draw, { prefix: `${drawPrefix}f` });
-        const seeds = new Map(partialEls.map((e) => [e.id, e.seed]));
-        visual = d.elements.map((e) => {
-          const s = seeds.get(e.id.replace(`${drawPrefix}f-`, `${drawPrefix}-`));
-          return s ? { ...e, seed: s } : e;
-        });
-        visualSteps = d.steps;
-        stepOf = d.stepOf || {};
-        narration = d.narration || [];
-        visualTitle = data.draw.find((i) => i && !i.shape && i.title) ? "Drawing" : "Suggested drawing";
-      } catch (e) {
-        console.warn("drawing failed", e);
-      }
-    } else if (data.diagram) {
-      try {
-        const { elements: dEls, files, styled } = await diagramElements(data.diagram);
-        if (files) api.addFiles(Object.values(files));
-        visual = dEls.map((e) => ({ ...e, ...styleDiagram(e, styled) }));
-        // shapes first, then the arrows between them
-        const isEdge = (e) => e.type === "arrow" || (e.type === "text" && visual.find((a) => a.id === e.containerId)?.type === "arrow");
-        visualSteps = [visual.filter((e) => !isEdge(e)).map((e) => e.id), visual.filter(isEdge).map((e) => e.id)];
-      } catch (e) {
-        console.warn("mermaid conversion failed", e);
-      }
-    }
-    if (visual.length) {
-      const vb = boundsOf(visual);
-      const title = convertToExcalidrawElements([
-        { type: "text", x: 0, y: 0, text: thread ? `✦ ${visualTitle} · from a comment` : visualTitle, fontSize: 14, fontFamily: FONT_FAMILY.Nunito, strokeColor: VIOLET },
-      ]);
-      const cb = block.length ? boundsOf(block) : null;
-      let placed, titled;
-      if (cb) {
-        titled = translate(title, cb.minX - title[0].x, cb.maxY + 28);
-        placed = translate(visual, cb.minX - vb.minX, cb.maxY + 56 - vb.minY);
-      } else {
-        const w = vb.maxX - vb.minX, h = vb.maxY - vb.minY + 28;
-        const at = visualSpot || findFreeSpot(w, h, anchor, live(api).filter((e) => !partialIds.has(e.id)));
-        titled = translate(title, at.x - title[0].x, at.y);
-        placed = translate(visual, at.x - vb.minX, at.y + 28 - vb.minY);
-      }
-      block = [
-        ...block,
-        ...[...titled, ...placed].map((e, i) => ({
+        const drawTitle = data.draw?.find((i) => !i.shape && i.title)?.title;
+        const mermaidTitle = data.diagram?.match(/^%%\s*title:\s*(.+)$/im)?.[1];
+        const title = drawTitle || mermaidTitle || question.trim().split("\n")[0].slice(0, 84) || "Diagram";
+        let steps, stepOf;
+        if (data.draw?.length) {
+          ({ elements: visual, steps, stepOf, narration = [] } = buildDrawing(data.draw, { prefix: `d${rid()}` }));
+        } else {
+          const { elements, files, styled } = await diagramElements(data.diagram, api.getAppState());
+          if (files) api.addFiles(Object.values(files));
+          visual = elements.map((e) => ({ ...e, ...styleDiagram(e, styled) }));
+          const arrows = new Set(visual.filter((e) => e.type === "arrow").map((e) => e.id));
+          const isEdge = (e) => arrows.has(e.id) || arrows.has(e.containerId);
+          steps = [visual.filter((e) => !isEdge(e)).map((e) => e.id), visual.filter(isEdge).map((e) => e.id)];
+        }
+        if (!validVisual(visual)) throw new Error("Drawing has no usable elements");
+        const caption = thread || data.answer?.trim() === title ? "" : data.answer;
+        const composition = composeVisual(visual, { title, caption, hasTitle: !!drawTitle });
+        if (!validVisual(composition.elements)) throw new Error("Drawing has invalid geometry");
+        const captionIds = new Set(composition.captionIds);
+        block = composition.elements.map((e, i) => ({
           ...e,
           groupIds: [...(e.groupIds || []), groupId],
           customData: {
-            claude: true, ...meta, role: "diagram",
-            // walkthrough: each element's step, and the narration on the title
-            ...(narration.length ? { step: stepOf[e.id] || 0, ...(i === 0 ? { narration } : {}) } : {}),
+            claude: true, ...meta, role: captionIds.has(e.id) ? e.type === "text" ? "text" : "holder" : "diagram",
+            visualReply: true, ...(i === 0 && !caption ? { contextText: title } : {}),
+            ...(narration.length ? { step: stepOf?.[e.id] || 0, ...(i === 0 ? { narration } : {}) } : {}),
           },
-        })),
-      ];
+        }));
+        animation = [composition.headingIds, ...steps, composition.captionIds].filter((ids) => ids.length);
+      } catch (e) {
+        visual = [];
+        narration = [];
+        console.warn("drawing verification failed", e);
+        if (!thread) api.setToast({ message: "The drawing could not be laid out.", duration: 4000 });
+      }
+    }
+    if (!block.length && !thread) {
+      block = cardElements({
+        header: `${data.engine === "codex" ? header.replace("✦ Claude", "✦ Codex (Claude out of budget)") : header}  (${(data.durationMs / 1000).toFixed(0)}s${cost}${used}${who ? ` · ${who}` : ""})`,
+        body: data.answer || "(empty answer)",
+        groupId,
+        meta,
+      });
     }
 
-    await settleVisual();
-    const hadPartial = partialIds.size > 0;
-    removeById(api, new Set([...placeholderIds, ...partialIds]));
-    if (!thread) {
+    clearTimeout(renderTimer);
+    removeById(api, placeholderIds);
+    if (block.length) {
       const b = boundsOf(block);
-      const at = findFreeSpot(b.maxX - b.minX, b.maxY - b.minY, anchor, live(api));
+      const obstacles = live(api);
+      const w = b.maxX - b.minX, h = b.maxY - b.minY;
+      const at = blank && !obstacles.length ? { x: cx - w / 2, y: cy - h / 2 }
+        : findFreeSpot(w, h, anchor, obstacles);
       block = translate(block, at.x - b.minX, at.y - b.minY);
     }
 
@@ -1117,18 +1078,32 @@ export async function askClaude(api, {
     }
 
     if (block.length) {
-      // No streaming happened (e.g. Codex): draw the visual out before committing it.
-      if (!hadPartial && visual.length) {
-        const temp = block.map((e) => ({ ...e, customData: { ...e.customData, claudePending: true } }));
-        const cardIds = temp.filter((e) => e.customData.role !== "diagram").map((e) => e.id);
-        const drawIds = new Set(temp.filter((e) => e.customData.role === "diagram").map((e) => e.id));
-        const steps = visualSteps.length ? visualSteps.map((s) => s.filter((id) => drawIds.has(id))) : [[...drawIds]];
-        const titleIds = [...drawIds].filter((id) => !steps.flat().includes(id));
-        await animateSteps(api, temp, [cardIds, titleIds, ...steps], { frames: 5, delay: 16 });
-        removeById(api, new Set(temp.map((e) => e.id)));
+      if (animation.length) {
+        const v = getVisibleSceneBounds(api.getAppState());
+        const b = boundsOf(block);
+        if (b.minX < v[0] || b.minY < v[1] || b.maxX > v[2] || b.maxY > v[3]) {
+          api.scrollToContent(block, { animate: true, fitToViewport: true, viewportZoomFactor: 0.76 });
+        }
+        const pending = block.map((e) => ({ ...e, customData: { ...e.customData, claudePending: true } }));
+        pendingVisualIds = new Set(pending.map((e) => e.id));
+        update({ status: "Drawing…" });
+        await animateSteps(api, pending, animation, { signal: controller.signal });
+        removeById(api, pendingVisualIds);
+        const current = boundsOf(block);
+        const obstacles = live(api);
+        const occupied = obstacles.some((e) => {
+          const b = boundsOf([e]);
+          return b.minX < current.maxX && b.maxX > current.minX && b.minY < current.maxY && b.maxY > current.minY;
+        });
+        if (occupied && !controller.signal.aborted) {
+          const at = findFreeSpot(current.maxX - current.minX, current.maxY - current.minY, anchor, obstacles);
+          block = translate(block, at.x - current.minX, at.y - current.minY);
+          api.scrollToContent(block, { animate: true, fitToViewport: true, viewportZoomFactor: 0.76 });
+        }
       }
+      if (controller.signal.aborted) throw new Error("cancelled");
       insert(api, block);
-      scrollIntoViewIfNeeded(api, block);
+      if (!animation.length) scrollIntoViewIfNeeded(api, block);
       if (narration.length) startWalkthrough(api, data.id);
     }
 
@@ -1167,8 +1142,7 @@ export async function askClaude(api, {
     if (ink.length) await animateInk(api, ink);
   } catch (e) {
     clearTimeout(renderTimer);
-    await settleVisual();
-    removeById(api, new Set([...placeholderIds, ...partialIds]));
+    removeById(api, new Set([...placeholderIds, ...pendingVisualIds]));
     const aborted = controller.signal.aborted || e.message === "cancelled";
     if (thread) reply?.error(aborted ? "Cancelled." : e.message.slice(0, 300));
     else

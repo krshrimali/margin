@@ -5,9 +5,9 @@ description: How to draw on the Margin whiteboard — flowcharts (Mermaid <diagr
 
 # Drawing on the board
 
-You have two ways to draw. Both become native, editable Excalidraw shapes placed under your answer card (or next
-to the commented element when you reply in a comment thread), and both stream: the user watches the picture build
-item by item, so write in reading order.
+You have two ways to draw. Both become native, editable Excalidraw shapes placed near the user's content (or next
+to the commented element when you reply in a comment thread). The user watches the finished layout build item by
+item, so write in reading order.
 
 | Use | Block | Best for |
 |---|---|---|
@@ -24,8 +24,9 @@ Draw when the user asks you to draw, sketch, diagram, visualise or explain somet
 system / flow and a corrected version helps more than a list of fixes. Don't draw for plain Q&A, and don't
 redraw what's already on the board: to fix one or two things in the user's drawing, use ink or edits instead.
 
-The card and the drawing split the work. The card says **why** (the insight, what changed, 2–4 bullets). The
-drawing shows **what**. Don't narrate the drawing node by node in the card.
+The drawing is the main answer. Give it a title that states the takeaway and use the answer text for a short
+caption (up to 30 words, excluding sources). For Mermaid, give the title in a first-line comment
+such as `%% title: Cache misses reach the origin`.
 
 ### Research, then draw
 
@@ -165,8 +166,11 @@ each side, enclosing the items. `text` goes at the tip; `color`, `bold`, `dashed
 
 - **Architecture**: actors (`person`) in column 0, entry points (`cloud`/`rounded`) column 1, services column 2,
   data (`cylinder`, `queue`) column 3. `group` around each zone, `number` badges for the request path.
-- **Comparison**: a `table` (≤ 5 columns × 6 rows), header row first, then a `check`/`star` near the winner or a
-  `note` with the recommendation. Or two columns of shapes with a `brace` per side.
+- **Two-way comparison or before / after**: put a single object in `<draw>` with
+  `{"layout":"comparison","title":"Takeaway","panels":[{"label":"Before","body":"First example"},{"label":"After","body":"Second example"}]}`.
+  Margin handles alignment, spacing, and the accent on the second panel. Put the focal example second.
+  Set `"code":true` on a panel for a literal snippet, and escape its line breaks with `\n`.
+  For comparisons across several categories use a `table`. For walkthroughs use the step markers below.
 - **Timeline**: shapes in one row, `at:[0,0] … [n,0]`, arrows between, dates in labels, a `brace` over a period.
 - **Layered stack**: rectangles in one column, `w:1.6`, top = closest to the user, one colour per layer family,
   braces on the side naming tiers ("runs in browser").
@@ -222,9 +226,8 @@ Flowchart node shapes — all of these are drawn as real shapes on the board:
 Edges: `-->` arrow, `-->|label|` labelled, `-.->` dashed (async, optional), `==>` thick (main path), `---` line,
 `<-->` two-way.
 
-**Colour**: without any `classDef`/`style` colours, the whole diagram is drawn in one violet ink — fine for a
-quick correction, wrong for anything the user asked you to draw. Normally define 3–5 classes by category and
-assign every node to one (`class A,B svc`). With `classDef name fill:#hex,stroke:#hex` (hex colours only), the
+**Colour**: without any `classDef`/`style` colours, the diagram uses neutral ink with a violet accent on decisions.
+Use explicit colours when they encode a needed distinction, such as success and failure. With `classDef name fill:#hex,stroke:#hex` (hex colours only), the
 colours are kept, so use them with the same semantic palette as above. Also use the node shapes (table below):
 databases `[( )]`, config `{{ }}`, I/O `[/ /]`, start/end `([ ])` — not `[ ]` for everything. Good pairs (stroke / fill): red `#e03131`/`#ffc9c9`, green
 `#2f9e44`/`#b2f2bb`, blue `#1971c2`/`#a5d8ff`, yellow `#f08c00`/`#ffec99`, violet `#6741d9`/`#d0bfff`,
@@ -296,7 +299,7 @@ pointing at. Use the user's own terms from the board ("Ingest", "Ranker", "Kafka
 2. Title states the idea. 5–12 shapes. One bold focal item.
 3. Every shape chosen for its meaning; same kind → same shape.
 4. Colour by category: 3–5 hues plus grey (not one colour for everything), same kind → same colour, red only
-   for problems; meaning also in the words. Mermaid: `classDef`s present.
+   for problems; meaning also in the words. Mermaid: use `classDef`s where colour adds meaning.
 4b. Shapes: no plain `rect` where a more specific shape fits; a brace / bracket where you group "these N things".
 5. Reading order: left→right or top→bottom; items written in that order.
 6. Labels ≤ 4 words in the user's terms; arrow labels ≤ 3 words.

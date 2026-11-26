@@ -387,7 +387,49 @@ function wrapText(text, width) {
  *   stepOf    – element id -> walkthrough step (0 = always shown), from {"step":n,"say":"…"} marker lines
  *   narration – [{ step, say }] in order
  */
+function buildComparison({ title, panels }, prefix) {
+  if (typeof title !== "string" || !title.trim() || !Array.isArray(panels) || panels.length !== 2 ||
+      panels.some((p) => typeof p?.label !== "string" || !p.label.trim() || typeof p.body !== "string" || !p.body.trim())) {
+    return { elements: [], steps: [] };
+  }
+
+  const pad = 24, gap = 24, top = 72;
+  const text = (id, value, fontSize, extra = {}) => ({
+    id: `${prefix}-${id}`, type: "text", x: 0, y: 0, text: value, fontSize,
+    fontFamily: FONT_FAMILY.Excalifont, strokeColor: DEFAULT_STROKE, ...extra,
+  });
+  const [heading, ...copy] = convertToExcalidrawElements([
+    text("title", wrapText(title.trim(), 46), 32),
+    ...panels.flatMap((panel, i) => [
+      text(`label-${i}`, wrapText(panel.label.trim(), 24), 22, { strokeColor: i === 1 ? "#5639b8" : "#495057" }),
+      text(`body-${i}`, panel.code === true ? panel.body.trimEnd() : wrapText(panel.body.trim(), 34), 18,
+        { fontFamily: panel.code === true ? FONT_FAMILY.Cascadia : FONT_FAMILY.Nunito }),
+    ]),
+  ], { regenerateIds: false });
+  const width = Math.max(260, ...copy.map((e) => e.width + pad * 2));
+  const labelHeight = Math.max(copy[0].height, copy[2].height);
+  const height = pad * 2 + labelHeight + 14 + Math.max(copy[1].height, copy[3].height);
+  const y = Math.max(top, heading.height + 28);
+  const backgrounds = convertToExcalidrawElements(panels.map((_, i) => ({
+    id: `${prefix}-panel-${i}`, type: "rectangle", x: i * (width + gap), y, width, height,
+    strokeColor: i === 1 ? "#a591ea" : "#adb5bd", backgroundColor: i === 1 ? "#f3efff" : "#f8f9fa",
+    fillStyle: "solid", strokeWidth: 1, roughness: 0, roundness: { type: ROUNDNESS.ADAPTIVE_RADIUS },
+  })), { regenerateIds: false });
+  const columns = backgrounds.map((bg, i) => {
+    const groupIds = [`${prefix}-comparison-${i}`];
+    const [label, body] = copy.slice(i * 2, i * 2 + 2);
+    return [
+      { ...bg, groupIds },
+      { ...label, groupIds, x: bg.x + pad, y: y + pad },
+      { ...body, groupIds, x: bg.x + pad, y: y + pad + labelHeight + 14 },
+    ];
+  });
+  return { elements: [heading, ...columns.flat()], steps: [[heading.id], ...columns.map((col) => col.map((e) => e.id))] };
+}
+
 export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
+  const comparison = items.find((i) => i?.layout === "comparison" && !i.shape);
+  if (comparison) return buildComparison(comparison, prefix);
   const opts = items.find((i) => i && !i.shape && (i.style || i.title)) || {};
   const ink = forceInk || String(opts.style || "").toLowerCase() === "ink";
   const roughness = 1;

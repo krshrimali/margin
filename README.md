@@ -43,9 +43,11 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
      to a specific card.
   2. **Answer.** The main model gets the snapshots, the board structure and the full text of only those answers.
      When you're replying to a card, it continues a fork of that card's Claude session, so it has the whole thread.
-- The answer streams into a violet card (about 120 words) placed in free space next to what it responds to.
-  Under the button you see what Claude is doing ("Picking relevant context…", "Reading src/log.rs…"), a timer
-  and a ✕ to cancel. Claude adds an editable suggested diagram only when you're designing a flow or system.
+- Text answers stream into a violet card placed in free space next to what they respond to. Drawing replies
+  put the titled, editable visual first and a short caption below it. Typed asks also work on a blank board.
+  Under the Ask button you can follow progress and cancel. Drawing replies show **Verifying drawing layout**
+  while Margin measures the visual and selects a layout. The drawing then animates in place in free canvas space.
+  Select a drawing and hover over **Regenerate** to see the model, effort, run time, and cost when available.
 - **Claude's ink.** Claude can also mark up your drawing with a pen in its own violet, like a teacher marking a page:
   circles, underlines, ✓ and ✗, strike-throughs, brackets, braces, parens and angle brackets (on either side or as an enclosing pair), missing arrows (looped around the side) and short
   handwritten notes. To make this precise, the server sends Claude a third snapshot where your content is grouped
@@ -82,8 +84,8 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   joined by straight, curved or elbow arrows that stay attached when you move things. Shapes are placed on a grid
   whose columns and rows grow to fit their labels and arrow labels. Colours come from Excalidraw's palette. Mermaid
   nodes like `[(DB)]`, `{{prep}}`, `[/io/]`, `[[sub]]` now get their real shapes too, and diagrams keep the colours
-  Claude gives them with `classDef` (otherwise they're drawn in Claude's violet ink). Drawings build up item by
-  item while Claude writes them: lines draw themselves and shapes fade in.
+  Claude gives them with `classDef`. Two-way comparisons have equal-width panels and can preserve code
+  indentation. Once placed, lines draw themselves and shapes fade in.
 - **Research.** Ask "research X online and then draw a flowchart / explain it" and Claude searches the web, reads
   a few sources, answers with a `Sources:` line and draws what it found.
 - **Changing diagrams in place.** Claude can add a shape (also *between* two connected shapes, re-routing the
@@ -153,3 +155,17 @@ Environment variables:
 | `WHITEBOARD_FORCE_CODEX` | | set to `1` to always use Codex (handy for testing) |
 
 Each request is logged in `data/asks/<id>/` (snapshot, prompt and result), which helps with debugging.
+
+### Verify drawing replies
+
+Use the normal Ask menu on a fresh board to check these prompts at fit-to-view. Repeat with
+`WHITEBOARD_FORCE_CODEX=1` to check the fallback engine's prompt.
+
+| Ask | Check |
+|---|---|
+| “Draw a whiteboard comparing nested Rust `if let` with let chains.” | The takeaway title appears once, code retains its indentation, panel tops align, and the caption is below both panels. |
+| “Draw a short flowchart showing what happens on a cache hit or miss.” | The title, labels, and caption fit on screen. The flowchart stays clear of the existing comparison. |
+| “Walk me through a DNS lookup step by step.” | The player opens on the first step. The full drawing survives a reload and can be replayed. |
+| “What is a DNS resolver?” | A text answer appears in a standard card. |
+
+For each drawing, check that the elements are editable and that one undo removes the generated composition.

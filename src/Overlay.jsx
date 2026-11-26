@@ -336,7 +336,14 @@ export function SelectionBar({ api, view, board, onAsk }) {
   const ids = sel;
   const pickedAlready = pickList.find((p) => p.elementIds.length === ids.length && p.elementIds.every((i) => ids.includes(i)));
   // a selected answer card can be asked again (e.g. with another model)
-  const card = selected.find((e) => e.customData?.claude && e.customData.askId && ["bg", "text", "holder", "header"].includes(e.customData.role));
+  const card = selected.find((e) => e.customData?.claude && e.customData.askId &&
+    ((e.customData.visualReply && !e.customData.threadId) || ["bg", "text", "holder", "header"].includes(e.customData.role)));
+  const details = card?.customData.visualReply && [
+    card.customData.modelLabel || (card.customData.engine === "codex" ? "Codex" : "Claude"),
+    card.customData.effort,
+    Number.isFinite(card.customData.durationMs) && `${(card.customData.durationMs / 1000).toFixed(1)}s`,
+    card.customData.costUsd > 0 && `$${card.customData.costUsd.toFixed(3)}`,
+  ].filter(Boolean).join(" · ");
   const regenQuestion = card?.customData.question || "";
   const regenFocus = card?.customData.focusIds || [];
   const stepsAsk = hasSteps(selected);
@@ -356,7 +363,7 @@ export function SelectionBar({ api, view, board, onAsk }) {
           <button onClick={comment} title="Comment on the selection (Alt+C)"><span className="ic">💬</span> Comment</button>
           <button onClick={() => { setRegen(false); setAsking(true); }} title="Ask Claude about the selection (Alt+A)"><span className="ic claude-ic">✦</span> Ask</button>
           {card && (
-            <button onClick={() => { setRegen(true); setAsking(true); }} title="Ask the same question again, e.g. with another model or effort, to compare">
+            <button onClick={() => { setRegen(true); setAsking(true); }} title={details || "Ask the same question again, e.g. with another model or effort, to compare"}>
               <span className="ic">↻</span> Regenerate
             </button>
           )}
