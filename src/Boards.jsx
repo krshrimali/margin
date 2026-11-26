@@ -9,20 +9,26 @@ const ago = (t) => {
   return new Date(t).toLocaleDateString();
 };
 
+async function request(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `Board request failed (${response.status})`);
+  return data;
+}
 const api = {
-  list: () => fetch("/api/boards").then((r) => r.json()).then((d) => d.boards || []),
+  list: () => request("/api/boards").then((d) => d.boards || []),
   create: (title, from) =>
-    fetch("/api/boards", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title, from }) }).then((r) => r.json()),
+    request("/api/boards", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ title, from }) }),
   rename: (id, title) =>
-    fetch(`/api/boards/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }),
-  remove: (id) => fetch(`/api/boards/${id}`, { method: "DELETE" }),
+    request(`/api/boards/${id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ title }) }),
+  remove: (id) => request(`/api/boards/${id}`, { method: "DELETE" }),
 };
 
 /**
  * Board switcher: the current board's name + save status at the top left;
  * click for the list of boards (thumbnails, search, new, rename, duplicate, delete).
  */
-export default function Boards({ board, status, onOpen, openSignal }) {
+export default function Boards({ board, status, onOpen, flush, retire, openSignal }) {
   const [open, setOpen] = useState(false);
   const [boards, setBoards] = useState([]);
   const [query, setQuery] = useState("");
@@ -33,7 +39,16 @@ export default function Boards({ board, status, onOpen, openSignal }) {
   const [confirmDelete, setConfirmDelete] = useState(null);
   const panelRef = useRef(null);
 
-  const refresh = () => api.list().then(setBoards).catch(() => {});
+  const [error, setError] = useState("");
+  const busy = useRef(false);
+  const action = (fn) => async (...args) => {
+    if (busy.current) return;
+    busy.current = true;
+    setError("");
+    try { await fn(...args); } catch (e) { setError(e.message); }
+    finally { busy.current = false; }
+  };
+  const refresh = () => api.list().then(setBoards).catch((e) => setError(e.message));
   useEffect(() => { refresh(); }, [status === "saved"]);
   useEffect(() => { if (openSignal) { setOpen(true); refresh(); } }, [openSignal]);
   useDismiss("boards", open, () => setOpen(false), { ref: panelRef, keep: [".board-pill"] });
@@ -47,33 +62,38 @@ export default function Boards({ board, status, onOpen, openSignal }) {
     return q ? boards.filter((b) => b.title.toLowerCase().includes(q)) : boards;
   }, [boards, query]);
 
-  const create = async () => {
+  const create = action(async () => {
     const t = newTitle.trim() || `Untitled board ${new Date().toLocaleDateString()}`;
     const { id } = await api.create(t);
-    onOpen(id);
-  };
-  const rename = async (id) => {
+    await onOpen(id);
+  });
+  const rename = action(async (id) => {
     await api.rename(id, editTitle);
     setEditing(null);
     refresh();
-  };
-  const duplicate = async (b) => {
+  });
+  const duplicate = action(async (b) => {
+    if (b.id === board && !(await flush())) return;
     const { id } = await api.create(`${b.title} (copy)`, b.id);
     await refresh();
     setEditing(id);
     setEditTitle(`${b.title} (copy)`);
-  };
-  const remove = async (b) => {
-    await api.remove(b.id);
+  });
+  const remove = action(async (b) => {
+    let nextId;
+    if (b.id === board) {
+      if (!(await flush())) return;
+      nextId = boards.find((x) => x.id !== b.id)?.id || (await api.create("My board")).id;
+      retire(true);
+    }
+    try { await api.remove(b.id); } catch (e) { retire(false); throw e; }
     setConfirmDelete(null);
     if (b.id === board) {
-      const next = boards.find((x) => x.id !== b.id);
-      if (next) onOpen(next.id);
-      else onOpen((await api.create("My board")).id);
+      await onOpen(nextId);
     } else refresh();
-  };
+  });
 
-  const statusText = { saved: "Saved", saving: "Saving…", unsaved: "Unsaved changes", error: "Not saved: server unreachable" }[status] || "";
+  const statusText = { saved: "Saved", saving: "Saving…", unsaved: "Unsaved changes", error: "Save failed" }[status] || "";
 
   return (
     <div className="boards" onKeyDown={(e) => e.stopPropagation()}>
@@ -85,6 +105,7 @@ export default function Boards({ board, status, onOpen, openSignal }) {
 
       {open && (
         <div className="boards-panel" ref={panelRef}>
+          {error && <p role="alert">{error}</p>}
           <div className="boards-head">
             <input autoFocus placeholder="Search boards…" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === "Escape" && setOpen(false)} />
             <button className="claude-btn small" onClick={() => { setCreating(true); setNewTitle(""); }}>+ New board</button>

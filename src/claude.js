@@ -8,8 +8,9 @@ import {
   FONT_FAMILY,
   ROUNDNESS,
 } from "@excalidraw/excalidraw";
+import { REQUEST_BYTES } from "./limits.js";
 import { regionsFor, markElements, renderInk, applyEdits, describeEdits } from "./ink.js";
-import { buildDrawing, outlineSkeletons } from "./draw.js";
+import { buildDrawing, outlineSkeletons, wrapText } from "./draw.js";
 import { startWalkthrough } from "./steps.js";
 
 export const SCOPES = {
@@ -397,31 +398,7 @@ function cardElements({ header, body, groupId, pending, meta }) {
 
 // ------------------------------------------------------------ diagrams ----
 // Mermaid → Excalidraw conversion can overlap labels (subgraph titles, long
-// edge labels). Try progressively simpler variants and keep the cleanest.
-
-/** Remove subgraph wrappers so their members become ordinary nodes. */
-function flattenSubgraphs(src) {
-  return src
-    .split("\n")
-    .filter((l) => !/^\s*subgraph\b/i.test(l) && !/^\s*end\s*$/i.test(l) && !/^\s*direction\s+\w+\s*$/i.test(l))
-    .join("\n");
-}
-
-/** Keep edge labels to a few words: |a long label| and -- a long label --> forms. */
-function shortenEdgeLabels(src, max = 18) {
-  const cut = (t) => {
-    t = t.trim();
-    if (t.length <= max) return t;
-    const words = t.split(/\s+/);
-    let out = "";
-    for (const w of words) {
-      if ((out + " " + w).trim().length > max) break;
-      out = (out + " " + w).trim();
-    }
-    return out || t.slice(0, max);
-  };
-  return src.replace(/\|([^|]+)\|/g, (_, t) => `|${cut(t)}|`);
-}
+// edge labels). Compare reading directions using the complete lesson footprint.
 
 function setDirection(src, dir) {
   return /^\s*(flowchart|graph)\s+\w+/im.test(src) ? src.replace(/^(\s*(?:flowchart|graph))\s+\w+/im, `$1 ${dir}`) : src;
@@ -534,23 +511,40 @@ function decorateShapes(skeletons, shapes) {
   return out;
 }
 
-async function diagramElements(mermaid, { width = 1000, height = 700 } = {}) {
+function flowContents(skeletons) {
+  const titles = new Set(skeletons.filter((e) => e.id?.endsWith("__title")).map((e) => e.id.slice(0, -7)));
+  const nodes = skeletons.filter((e) => ["rectangle", "diamond", "ellipse"].includes(e.type) && e.id);
+  const groups = nodes.filter((e) => titles.has(e.id)).map((g) => {
+    const members = nodes.filter((n) => n !== g && n.x >= g.x - 1 && n.y >= g.y - 1 &&
+      n.x + n.width <= g.x + g.width + 1 && n.y + n.height <= g.y + g.height + 1);
+    return [g.id, members.map((n) => n.id).sort()];
+  });
+  const relations = skeletons.filter((e) => e.type === "arrow").map((e) => [e.start?.id, e.end?.id, e.label?.text || ""]);
+  const labels = skeletons.map((e) => e.label?.text || e.text).filter(Boolean).sort();
+  return JSON.stringify([groups.sort(), relations.sort(), labels]);
+}
+
+async function diagramElements(mermaid, { width = 1000, height = 700 } = {}, lesson) {
   const { parseMermaidToExcalidraw } = await import("@excalidraw/mermaid-to-excalidraw");
   const src = mermaid.trim();
-  const flat = shortenEdgeLabels(flattenSubgraphs(src));
-  const variants = [src, setDirection(src, "TD"), setDirection(src, "LR"), shortenEdgeLabels(src), flat, setDirection(flat, "TD"), setDirection(flat, "LR")];
+  const variants = [src, setDirection(src, "TD"), setDirection(src, "LR")];
   const shapes = mermaidNodeShapes(src);
-  let best = null;
+  let best = null, originalContents;
   for (const v of [...new Set(variants)]) {
     try {
       const { elements, files } = await parseMermaidToExcalidraw(v, { themeVariables: { fontSize: "16px" } });
+      if (/^\s*(flowchart|graph)\s+/im.test(src)) {
+        const contents = flowContents(elements);
+        originalContents ??= contents;
+        if (contents !== originalContents) continue;
+      }
       const els = convertToExcalidrawElements(decorateShapes(withExcalifont(elements), shapes), { regenerateIds: true });
       if (!validVisual(els)) continue;
-      const b = boundsOf(els);
+      const b = boundsOf(lesson ? composeVisual(els, lesson).elements : els);
       const fit = Math.min(1, Math.max(1, width - 96) / Math.max(1, b.maxX - b.minX),
         Math.max(1, height - 160) / Math.max(1, b.maxY - b.minY));
       const overlaps = overlapScore(els.filter((e) => e.type !== "line" || e.customData));
-      const score = overlaps * 10 + Math.max(0, 1 - fit) * 8 + (v === src ? 0 : variants.indexOf(v) <= 2 ? 0.1 : 2);
+      const score = overlaps * 10 + Math.max(0, 1 - fit) * 8 + (v === src ? 0 : 0.1);
       if (!best || score < best.score) best = { elements: els, files, score };
       if (score === 0) break;
     } catch (e) {
@@ -566,16 +560,16 @@ function validVisual(elements) {
     elements.every((e) => [e.x, e.y, e.width, e.height].every(Number.isFinite));
 }
 
-function composeVisual(visual, { title, caption, hasTitle }) {
+function composeVisual(visual, { title, caption, hasTitle, viewportWidth = window.innerWidth }) {
   const b = boundsOf(visual);
   const labels = [];
   if (!hasTitle) {
     const [heading] = convertToExcalidrawElements([
-      { type: "text", x: b.minX, y: b.minY, text: title, fontSize: 30, fontFamily: FONT_FAMILY.Excalifont, strokeColor: "#1e1e1e" },
+      { type: "text", x: b.minX, y: b.minY, text: wrapText(title, Math.max(12, Math.min(60, Math.floor((viewportWidth - 64) / 17)))), fontSize: 30, fontFamily: FONT_FAMILY.Excalifont, strokeColor: "#1e1e1e" },
     ]);
     labels.push({ ...heading, y: b.minY - heading.height - 28 });
   }
-  const width = Math.max(320, Math.min(720, b.maxX - b.minX));
+  const width = Math.min(Math.max(200, viewportWidth - 64), Math.max(320, Math.min(720, b.maxX - b.minX)));
   const footer = caption && convertToExcalidrawElements([{
     type: "rectangle", x: b.minX, y: b.maxY + 22, width, height: 36, strokeColor: "transparent",
     backgroundColor: "transparent", roughness: 0,
@@ -660,7 +654,7 @@ function scrollIntoViewIfNeeded(api, els) {
   const v = getVisibleSceneBounds(api.getAppState());
   const b = boundsOf(els);
   const visible = b.minX < v[2] && b.maxX > v[0] && b.minY < v[3] && b.maxY > v[1];
-  if (!visible) api.scrollToContent(els, { animate: true, fitToViewport: false });
+  if (!visible) api.scrollToContent(els, { animate: !matchMedia("(prefers-reduced-motion: reduce)").matches, fitToViewport: false });
 }
 
 
@@ -673,6 +667,7 @@ export const onRunningChange = (fn) => {
   listeners.add(fn);
   return () => listeners.delete(fn);
 };
+export const showDrawing = (id) => { const run = running.get(id); if (run) run.skipAnimation = true; };
 export const cancelAsk = (id) => running.get(id)?.controller.abort();
 
 // ------------------------------------------------------ edit proposals ---
@@ -695,29 +690,34 @@ function commitEdits(api, { changed, added = [] }, capture) {
 }
 
 const pendingIdx = (p) => p.state.map((s, i) => (s === "pending" ? i : -1)).filter((i) => i >= 0);
+export const savedProposals = () => [...proposals.values()].map(({ preview, ...p }) => p);
+export function restoreProposals(saved = []) {
+  proposals.clear();
+  for (const p of saved || []) if (p?.id && Array.isArray(p.commands) && Array.isArray(p.state)) proposals.set(p.id, p);
+  notifyProposals();
+}
 function computeEdits(api, p, indices = pendingIdx(p)) {
-  return applyEdits({ commands: indices.map((i) => p.commands[i]), regions: p.regions, elementsById: new Map(live(api).map((e) => [e.id, e])) });
+  return applyEdits({ commands: indices.map((i) => p.commands[i]), regions: p.regions,
+    aliases: p.aliases, elementsById: new Map(live(api).map((e) => [e.id, e])) });
 }
 
-/** Show (or hide) a proposal on the board without recording it in undo history. */
 export function previewProposal(api, id, on) {
   const p = proposals.get(id);
   if (!p) return;
-  if (on && !p.preview) {
-    const res = computeEdits(api, p);
-    const before = new Map();
-    for (const e of api.getSceneElementsIncludingDeleted()) if (res.changed.has(e.id)) before.set(e.id, e);
-    p.preview = { before, added: new Set(res.added.map((e) => e.id)) };
-    commitEdits(api, res, CaptureUpdateAction.NEVER);
-  } else if (!on && p.preview) {
-    const { before, added } = p.preview;
-    p.preview = null;
-    api.updateScene({
-      elements: api.getSceneElementsIncludingDeleted().filter((e) => !added.has(e.id)).map((e) => before.get(e.id) || e),
-      captureUpdate: CaptureUpdateAction.NEVER,
-    });
-  }
+  proposals.set(id, { ...p, preview: on });
   notifyProposals();
+}
+export async function proposalImage(api, p) {
+  const { changed, added } = computeEdits(api, p);
+  const targets = new Set(proposalTargets(api, p.id).map((e) => e.id));
+  const elements = [...live(api).filter((e) => targets.has(e.id) || changed.has(e.id)).map((e) => changed.get(e.id) || e), ...added].filter((e) => !e.isDeleted);
+  if (!elements.length) return null;
+  return exportToBlob({ elements, files: api.getFiles(), appState: { exportBackground: true, viewBackgroundColor: "#ffffff" }, mimeType: "image/png", maxWidthOrHeight: 1000 });
+}
+export function blockedEdit(p, i) {
+  const c = p.commands[i];
+  const refs = [c.from, c.to, c.near, c.target, ...(c.targets || []), ...(c.between || [])];
+  return p.commands.slice(0, i).some((prior, j) => prior.id && refs.includes(prior.id) && p.state[j] !== "accepted");
 }
 
 /**
@@ -729,16 +729,22 @@ export function resolveProposal(api, id, accept, indices = null) {
   if (!p) return;
   previewProposal(api, id, false);
   const idx = (indices || pendingIdx(p)).filter((i) => p.state[i] === "pending");
+  const state = [...p.state];
   if (accept && idx.length) {
+    if (indices && idx.some((i) => blockedEdit(p, i))) return;
     const res = computeEdits(api, p, idx);
+    p.aliases = res.aliases;
+    idx.forEach((i, j) => { state[i] = res.outcomes[j]; });
     if (res.changed.size || res.added.length) {
       commitEdits(api, res, CaptureUpdateAction.IMMEDIATELY);
       api.setToast({ message: `Applied ${res.done} edit${res.done === 1 ? "" : "s"}${res.skipped.length ? ` (${res.skipped.length} skipped)` : ""}. Ctrl+Z undoes it.`, duration: 3500 });
     } else api.setToast({ message: "Nothing to change: those parts of the board are gone.", duration: 3000 });
   }
-  const state = p.state.map((s, i) => (idx.includes(i) ? (accept ? "accepted" : "rejected") : s));
-  const next = { ...p, state };
-  if (state.every((s) => s !== "pending")) proposals.delete(id);
+  if (!accept) idx.forEach((i) => { state[i] = "rejected"; });
+  if (state.some((s) => s === "skipped" || s === "partial")) api.setToast({ message: "Some suggested edits could not be fully applied.", duration: 4000 });
+  const next = { ...p, state, preview: false };
+  const reviewFailures = accept && state.some((s) => s === "skipped" || s === "partial");
+  if (!reviewFailures && state.every((s) => s !== "pending")) proposals.delete(id);
   else proposals.set(id, next);
   notifyProposals();
 }
@@ -800,7 +806,7 @@ function frameOf(e, t) {
  * out and its shapes fade in, one step after another. The caller commits the
  * real elements afterwards.
  */
-async function animateSteps(api, els, steps, { signal, frames = 5, delay = 16 } = {}) {
+async function animateSteps(api, els, steps, { signal, skip, frames = 5, delay = 16 } = {}) {
   const byId = new Map(els.map((e) => [e.id, e]));
   const shown = new Set();
   const ids = new Set(els.map((e) => e.id));
@@ -813,7 +819,7 @@ async function animateSteps(api, els, steps, { signal, frames = 5, delay = 16 } 
     const stepEls = step.map((id) => byId.get(id)).filter(Boolean);
     if (!stepEls.length) continue;
     for (let f = 1; f <= frames; f++) {
-      if (signal?.aborted) return;
+      if (signal?.aborted || skip?.()) return;
       put(stepEls.map((e) => frameOf(e, f / frames)));
       await sleep(delay);
     }
@@ -846,13 +852,13 @@ const shortModel = (m) => {
  */
 export async function askClaude(api, {
   scope = "auto", question = "", cwd, model = "", effort = "", editMode = "auto", picks = [], thread = null, reply = null,
-  attachments = [], links = [], steps = false, maxBudget = 0, excludeAsk = null,
+  attachments = [], links = [], steps = false, maxBudget = 0, projectAccess = false, excludeAsk = null, replayId = null, legacyReplayId = null,
 }) {
   const askedAt = Date.now();
   await fontsReady();
   const t = selectTargets(api, thread ? "viewport" : scope, { picks, question, threadIds: thread?.elementIds, excludeAsk });
   const blank = !t.context.length;
-  if (blank && (thread || !(question.trim() || attachments.length || links.length))) {
+  if (blank && (thread || !(question.trim() || replayId || attachments.length || links.length))) {
     const message = "The board is empty. Type a question or draw something first.";
     if (thread) reply?.error(message);
     else api.setToast({ message, duration: 3000 });
@@ -932,14 +938,16 @@ export async function askClaude(api, {
   };
 
   try {
+    const body = JSON.stringify({
+        replayId, legacyReplayId, projectAccess, image, focusImage: focusImages[0] || null, extraFocusImages: focusImages.slice(1), marksImage, regions: regionList, summary, question,
+        scope: t.scope, prior, cwd, model, effort, editMode, attachments, links, steps, maxBudget,
+        thread: thread ? { messages: thread.messages, sessionId: thread.sessionId || null, engine: thread.engine || null, cwd: thread.cwd || null } : null,
+      });
+    if (new Blob([body]).size > REQUEST_BYTES) throw new Error("Board images and files exceed the 60 MiB request limit. Select a smaller region or remove an attachment.");
     const res = await fetch("/api/ask", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        image, focusImage: focusImages[0] || null, extraFocusImages: focusImages.slice(1), marksImage, regions: regionList, summary, question,
-        scope: t.scope, prior, cwd, model, effort, editMode, attachments, links, steps, maxBudget,
-        thread: thread ? { messages: thread.messages, sessionId: thread.sessionId || null, engine: thread.engine || null, cwd: thread.cwd || null } : null,
-      }),
+      body,
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -978,6 +986,7 @@ export async function askClaude(api, {
       question: question || "", scope: t.scope, askId: data.id, sessionId: data.sessionId, engine: data.engine || "claude", cwd: data.cwd,
       askedAt, contextIds: data.contextIds, followUpOf: data.followUpOf, model: data.model || "", effort: data.effort || "",
       modelLabel, durationMs: data.durationMs, costUsd: data.costUsd,
+      inputRef: data.inputRef || null, replayFocus: t.focus.map((e) => e.id), walkthrough: steps,
       focusIds: t.focus.filter((e) => !isClaude(e)).slice(0, 300).map((e) => e.id),
       ...(thread ? { threadId: thread.id } : {}),
     };
@@ -998,9 +1007,9 @@ export async function askClaude(api, {
         const title = drawTitle || mermaidTitle || question.trim().split("\n")[0].slice(0, 84) || "Diagram";
         let steps, stepOf;
         if (data.draw?.length) {
-          ({ elements: visual, steps, stepOf, narration = [] } = buildDrawing(data.draw, { prefix: `d${rid()}` }));
+          ({ elements: visual, steps, stepOf, narration = [] } = buildDrawing(data.draw, { prefix: `d${rid()}`, viewportWidth: api.getAppState().width }));
         } else {
-          const { elements, files, styled } = await diagramElements(data.diagram, api.getAppState());
+          const { elements, files, styled } = await diagramElements(data.diagram, api.getAppState(), { title, caption: thread ? "" : data.answer });
           if (files) api.addFiles(Object.values(files));
           visual = elements.map((e) => ({ ...e, ...styleDiagram(e, styled) }));
           const arrows = new Set(visual.filter((e) => e.type === "arrow").map((e) => e.id));
@@ -1026,7 +1035,7 @@ export async function askClaude(api, {
         visual = [];
         narration = [];
         console.warn("drawing verification failed", e);
-        if (!thread) api.setToast({ message: "The drawing could not be laid out.", duration: 4000 });
+        api.setToast({ message: `Drawing unavailable: ${e.message}`, duration: 4000 });
       }
     }
     if (!block.length && !thread) {
@@ -1082,12 +1091,12 @@ export async function askClaude(api, {
         const v = getVisibleSceneBounds(api.getAppState());
         const b = boundsOf(block);
         if (b.minX < v[0] || b.minY < v[1] || b.maxX > v[2] || b.maxY > v[3]) {
-          api.scrollToContent(block, { animate: true, fitToViewport: true, viewportZoomFactor: 0.76 });
+          api.scrollToContent(block, { animate: !matchMedia("(prefers-reduced-motion: reduce)").matches, fitToViewport: true, viewportZoomFactor: 0.76 });
         }
         const pending = block.map((e) => ({ ...e, customData: { ...e.customData, claudePending: true } }));
         pendingVisualIds = new Set(pending.map((e) => e.id));
         update({ status: "Drawing…" });
-        await animateSteps(api, pending, animation, { signal: controller.signal });
+        await animateSteps(api, pending, animation, { signal: controller.signal, skip: () => running.get(runId)?.skipAnimation || matchMedia("(prefers-reduced-motion: reduce)").matches });
         removeById(api, pendingVisualIds);
         const current = boundsOf(block);
         const obstacles = live(api);
@@ -1098,7 +1107,7 @@ export async function askClaude(api, {
         if (occupied && !controller.signal.aborted) {
           const at = findFreeSpot(current.maxX - current.minX, current.maxY - current.minY, anchor, obstacles);
           block = translate(block, at.x - current.minX, at.y - current.minY);
-          api.scrollToContent(block, { animate: true, fitToViewport: true, viewportZoomFactor: 0.76 });
+          api.scrollToContent(block, { animate: !matchMedia("(prefers-reduced-motion: reduce)").matches, fitToViewport: true, viewportZoomFactor: 0.76 });
         }
       }
       if (controller.signal.aborted) throw new Error("cancelled");
@@ -1137,9 +1146,12 @@ export async function askClaude(api, {
       durationMs: data.durationMs, costUsd: data.costUsd, drew: visual.length > 0, inked: ink.length > 0, proposalId: proposal?.id || null,
       edited: !!(Array.isArray(data.edits) && data.edits.length && editMode === "auto"),
       steps: narration.length,
-      askId: data.id,
+      askId: data.id, inputRef: data.inputRef,
     });
-    if (ink.length) await animateInk(api, ink);
+    if (ink.length) {
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) insert(api, ink);
+      else await animateInk(api, ink);
+    }
   } catch (e) {
     clearTimeout(renderTimer);
     removeById(api, new Set([...placeholderIds, ...pendingVisualIds]));

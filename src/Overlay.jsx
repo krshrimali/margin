@@ -5,8 +5,9 @@
 //   - ProposalsPanel: edits Claude proposes when edits are set to "Ask first"
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCommonBounds, getSceneVersion } from "@excalidraw/excalidraw";
-import { askClaude, cancelAsk, onRunningChange, MODELS, EFFORTS, EDIT_MODES, onProposalsChange, applyProposal, discardProposal, previewProposal, proposalTargets, resolveProposal } from "./claude.js";
+import { askClaude, cancelAsk, onRunningChange, MODELS, EFFORTS, EDIT_MODES, onProposalsChange, applyProposal, discardProposal, previewProposal, proposalImage, blockedEdit, proposalTargets, resolveProposal } from "./claude.js";
 import { comments, picks, prefs, ui, rid, updateThread, updateMessage, useStore, useDismiss, LS, takeAskPrefs } from "./store.js";
+import { FILE_BYTES, ATTACHMENT_BYTES, FILE_COUNT } from "./limits.js";
 import { player, startWalkthrough, goToStep, endWalkthrough, hasSteps } from "./steps.js";
 import { exportToBlob } from "@excalidraw/excalidraw";
 
@@ -112,6 +113,9 @@ export function AskOptions({ compact = false }) {
           <input type="number" min="0" step="0.05" placeholder="none" value={p.maxBudget || ""} onChange={(e) => prefs.set((s) => ({ ...s, maxBudget: Math.max(0, Number(e.target.value) || 0) }))} />
         </label>
       </div>
+      <label className="steps-toggle" title="Allow reading the configured project for this ask">
+        <input type="checkbox" checked={p.projectAccess} onChange={(e) => prefs.set((s) => ({ ...s, projectAccess: e.target.checked }))} /> Read project files
+      </label>
       <label className={`steps-toggle ${p.steps ? "on" : ""}`} title="Claude draws it as a step-by-step walkthrough you play one step at a time (this ask only)">
         <input type="checkbox" checked={p.steps} onChange={(e) => prefs.set((s) => ({ ...s, steps: e.target.checked }))} /> ▶ Walk me through it, step by step
       </label>
@@ -120,7 +124,6 @@ export function AskOptions({ compact = false }) {
 }
 
 // ---------------------------------------------------------- attachments ---
-const MAX_FILE = 15 * 1024 * 1024;
 const readFile = (f) =>
   new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -129,19 +132,23 @@ const readFile = (f) =>
     r.readAsDataURL(f);
   });
 
+async function addFiles(list, files, setFiles) {
+  if (files.length + list.length > FILE_COUNT) return alert("An ask can include up to 8 files.");
+  const large = list.find((f) => f.size > FILE_BYTES);
+  if (large) return alert(large.name + " exceeds 15 MiB.");
+  if ([...files, ...list].reduce((sum, f) => sum + f.size, 0) > ATTACHMENT_BYTES) return alert("Attachments exceed 36 MiB combined.");
+  const out = [];
+  for (const f of list) {
+    out.push(await readFile(f));
+  }
+  setFiles((x) => [...x, ...out].slice(0, 8));
+}
+
 /** Files (PDFs, images, text, code) and links to send with a question. */
 export function Attachments({ files, setFiles, links, setLinks }) {
   const input = useRef(null);
   const [adding, setAdding] = useState(false);
   const [url, setUrl] = useState("");
-  const add = async (list) => {
-    const out = [];
-    for (const f of list) {
-      if (f.size > MAX_FILE) { alert(`${f.name} is larger than 15 MB.`); continue; }
-      out.push(await readFile(f));
-    }
-    setFiles((x) => [...x, ...out].slice(0, 8));
-  };
   const addUrl = () => {
     const u = url.trim();
     if (/^https?:\/\/\S+$/i.test(u)) setLinks((x) => [...new Set([...x, u])].slice(0, 8));
@@ -150,7 +157,7 @@ export function Attachments({ files, setFiles, links, setLinks }) {
   };
   return (
     <div className="attach-row">
-      <input ref={input} type="file" multiple hidden accept=".pdf,image/*,.txt,.md,.csv,.json,.js,.ts,.py,.rs,.go,.java,.html,.css,.yaml,.yml,.toml,.sql" onChange={(e) => { add([...e.target.files]); e.target.value = ""; }} />
+      <input ref={input} type="file" multiple hidden accept=".pdf,image/*,.txt,.md,.csv,.json,.js,.ts,.py,.rs,.go,.java,.html,.css,.yaml,.yml,.toml,.sql" onChange={(e) => { addFiles([...e.target.files], files, setFiles); e.target.value = ""; }} />
       <button className="btn ghost tiny" onClick={() => input.current.click()} title="Attach PDFs, images or text files">📎 File</button>
       {adding ? (
         <input
@@ -204,9 +211,7 @@ export function Composer({ placeholder, onSend, onCancel, autoFocus = true, acti
         e.stopPropagation();
         setDrag(false);
         const list = [...e.dataTransfer.files];
-        const out = [];
-        for (const f of list) if (f.size <= MAX_FILE) out.push(await readFile(f));
-        setFiles((x) => [...x, ...out].slice(0, 8));
+        await addFiles(list, files, setFiles);
         const u = e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text/plain");
         if (!list.length && /^https?:\/\//.test(u)) setLinks((x) => [...new Set([...x, u.trim()])]);
       }}
@@ -268,7 +273,7 @@ function runThreadReply(api, board, threadId, history, question, reply, opts, ex
       done: (d) => {
         updateMessage(threadId, reply.id, {
           text: d.answer, pending: false, status: "", model: d.model || opts.model, effort: d.effort, drew: d.drew, inked: d.inked,
-          proposalId: d.proposalId, edited: d.edited, durationMs: d.durationMs, engine: d.engine, askId: d.askId, costUsd: d.costUsd, steps: d.steps,
+          inputRef: d.inputRef || null, walkthrough: !!(extras.steps || opts.steps), proposalId: d.proposalId, edited: d.edited, durationMs: d.durationMs, engine: d.engine, askId: d.askId, costUsd: d.costUsd, steps: d.steps,
         });
         if (!extras.fresh) updateThread(threadId, (t) => ({ ...t, sessionId: d.sessionId || t.sessionId, engine: d.engine, cwd: d.cwd }));
       },
@@ -304,7 +309,7 @@ export function regenerateInThread(api, board, threadId, msgId) {
   const opts = takeAskPrefs();
   const reply = { id: rid(), author: "claude", text: "", at: Date.now(), pending: true, status: "Trying again…", model: opts.model, effort: opts.effort, regenOf: msgId };
   updateThread(threadId, (t) => ({ ...t, resolved: false, messages: [...t.messages, reply] }));
-  runThreadReply(api, board, threadId, history, lastUser?.text || "Please look at this and reply.", reply, opts, { fresh: true });
+  runThreadReply(api, board, threadId, history, lastUser?.text || "Please look at this and reply.", reply, opts, { fresh: true, replayId: thread.messages[i].inputRef, legacyReplayId: !("inputRef" in thread.messages[i]) ? thread.messages[i].askId : null, steps: opts.steps || thread.messages[i].walkthrough });
 }
 
 // --------------------------------------------------------- SelectionBar ---
@@ -345,7 +350,7 @@ export function SelectionBar({ api, view, board, onAsk }) {
     card.customData.costUsd > 0 && `$${card.customData.costUsd.toFixed(3)}`,
   ].filter(Boolean).join(" · ");
   const regenQuestion = card?.customData.question || "";
-  const regenFocus = card?.customData.focusIds || [];
+  const regenFocus = card?.customData.replayFocus || card?.customData.focusIds || [];
   const stepsAsk = hasSteps(selected);
   const top = box.y0 - 52 < 70 ? box.y1 + 12 : box.y0 - 52;
   const barW = asking ? 420 : 300 + (card ? 120 : 0) + (stepsAsk ? 110 : 0);
@@ -388,9 +393,12 @@ export function SelectionBar({ api, view, board, onAsk }) {
               if (regen) {
                 // same focus (or scope) as the original answer, without the original answer itself; the new card lands next to it
                 const scopeWas = { selection: "viewport", new: "viewport", picks: "viewport", comment: "viewport" }[card.customData.scope] || card.customData.scope || "viewport";
+                const options = takeAskPrefs();
                 onAsk({
                   ...(regenFocus.length ? { scope: "picks", picks: regenFocus } : { scope: scopeWas }),
-                  question: q || regenQuestion, excludeAsk: card.customData.askId, ...takeAskPrefs(), ...extras,
+                  question: q || regenQuestion, excludeAsk: card.customData.askId, replayId: card.customData.inputRef,
+                  legacyReplayId: !("inputRef" in card.customData) ? card.customData.askId : null, ...options, ...extras,
+                  steps: extras.steps || card.customData.walkthrough || options.steps,
                 });
                 return;
               }
@@ -518,6 +526,18 @@ const KIND_ICON = { style: "🎨", text: "✎", move: "↔", delete: "🗑", add
 
 /** Claude's proposed edits, one row each with accept / reject (used in threads and the panel). */
 function Suggestions({ api, p }) {
+  const [preview, setPreview] = useState("");
+  const [previewText, setPreviewText] = useState("");
+  useEffect(() => {
+    let active = true, url;
+    setPreview(""); setPreviewText("");
+    if (p.preview) proposalImage(api, p).then((blob) => {
+      if (!active) return;
+      if (blob) { url = URL.createObjectURL(blob); setPreview(url); }
+      else setPreviewText("The proposed edits remove the selected content.");
+    }).catch(() => { if (active) setPreviewText("Preview unavailable."); });
+    return () => { active = false; if (url) URL.revokeObjectURL(url); };
+  }, [p, api]);
   const pending = p.state.filter((s) => s === "pending").length;
   return (
     <div className="suggestions">
@@ -536,6 +556,7 @@ function Suggestions({ api, p }) {
           {p.preview ? "Hide preview" : "Preview"}
         </button>
       </div>
+      {p.preview && (preview ? <img src={preview} alt="Proposed result" style={{ maxWidth: "100%", maxHeight: 320 }} /> : <p>{previewText || "Preparing preview…"}</p>)}
       <ul className="prop-list">
         {p.lines.map((l, i) => (
           <li key={i} className={p.state[i]}>
@@ -547,7 +568,7 @@ function Suggestions({ api, p }) {
             </span>
             {p.state[i] === "pending" ? (
               <>
-                <button className="mini ok" title="Accept this edit" onClick={() => resolveProposal(api, p.id, true, [i])}>✓</button>
+                <button className="mini ok" disabled={blockedEdit(p, i)} title={blockedEdit(p, i) ? "Accept the referenced addition first" : "Accept this edit"} onClick={() => resolveProposal(api, p.id, true, [i])}>✓</button>
                 <button className="mini no" title="Reject this edit" onClick={() => resolveProposal(api, p.id, false, [i])}>✕</button>
               </>
             ) : (
@@ -558,8 +579,8 @@ function Suggestions({ api, p }) {
       </ul>
       <div className="prop-actions">
         <span className="grow" />
-        <button className="btn ghost" onClick={() => discardProposal(api, p.id)}>Reject all</button>
-        <button className="btn claude" onClick={() => applyProposal(api, p.id)}>Accept all</button>
+        <button className="btn ghost" onClick={() => discardProposal(api, p.id)}>{pending ? "Reject all" : "Dismiss"}</button>
+        <button className="btn claude" disabled={!pending} onClick={() => applyProposal(api, p.id)}>Accept all</button>
       </div>
     </div>
   );

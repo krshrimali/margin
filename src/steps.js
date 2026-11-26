@@ -60,10 +60,11 @@ export function startWalkthrough(api, askId) {
   const n = walkthroughs(api).get(askId);
   if (!n) return false;
   player.set({ askId, steps: n, index: 0 });
-  setVisible(api, askId, n[0].step, n[0].step);
-  fadeIn(api, askId, n[0].step);
+  const motion = !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  setVisible(api, askId, n[0].step, motion ? n[0].step : null);
+  if (motion) fadeIn(api, askId, n[0].step);
   const els = api.getSceneElements().filter((e) => e.customData?.askId === askId && e.customData.role === "diagram");
-  if (els.length) api.scrollToContent(els, { animate: true, fitToViewport: true, viewportZoomFactor: 0.8 });
+  if (els.length) api.scrollToContent(els, { animate: motion, fitToViewport: true, viewportZoomFactor: 0.8 });
   return true;
 }
 
@@ -71,7 +72,7 @@ export function goToStep(api, index) {
   const p = player.get();
   if (!p) return;
   const i = Math.max(0, Math.min(p.steps.length - 1, index));
-  const forward = i > p.index;
+  const forward = i > p.index && !matchMedia("(prefers-reduced-motion: reduce)").matches;
   player.set({ ...p, index: i });
   setVisible(api, p.askId, p.steps[i].step, forward ? p.steps[i].step : null);
   if (forward) fadeIn(api, p.askId, p.steps[i].step);

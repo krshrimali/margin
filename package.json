@@ -8,7 +8,9 @@
     "build": "vite build",
     "start": "vite build && node server/index.js",
     "serve": "node server/index.js",
-    "postinstall": "node scripts/patch-excalidraw.mjs"
+    "postinstall": "node scripts/patch-excalidraw.mjs",
+    "test": "npm run build && node tests/asks.mjs && node tests/browser.mjs",
+    "test:live": "npm run build && node tests/live.mjs"
   },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.3.0",
+    "playwright-core": "^1.65.1",
     "vite": "^8.3.8"
   }
 }

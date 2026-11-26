@@ -6,7 +6,7 @@ import PenDock from "./PenDock.jsx";
 import { PRESETS, loadPenSettings, savePenSettings } from "./pens.js";
 import { clearInk, inkState, setInkHidden } from "./ink.js";
 import Boards from "./Boards.jsx";
-import { SCOPES, SCOPE_HINTS, askClaude, cancelAsk, onRunningChange } from "./claude.js";
+import { SCOPES, SCOPE_HINTS, askClaude, cancelAsk, showDrawing, onRunningChange, savedProposals, restoreProposals, onProposalsChange } from "./claude.js";
 import { LS, comments, picks, prefs, ui, useStore, takeAskPrefs, useDismiss } from "./store.js";
 import {
   AskOptions, Attachments, CommandBar, CommentPins, CommentsPanel, ContextTray, PickHighlights, ProposalsPanel, SelectionBar, StepPlayer, ThreadPopover,
@@ -22,17 +22,23 @@ if (new URLSearchParams(location.search).get("board") !== BOARD) {
   history.replaceState(null, "", u);
 }
 
+let boardRevision, loadFailure;
 const loadBoard = async () => {
   try {
     const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`);
-    if (!r.ok) return { appState: { currentItemRoughness: 0 }, scrollToContent: true };
+    if (r.status === 404) return { appState: { currentItemRoughness: 0 }, scrollToContent: true };
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    boardRevision = r.headers.get("etag");
     const data = await r.json();
+    if (!Array.isArray(data.elements)) throw new Error("Invalid board file");
+    restoreProposals(data.proposals);
     // comment threads are saved alongside the elements
     // picked context is saved per board too
     picks.set(Array.isArray(data.picks) ? data.picks : []);
     comments.set(Array.isArray(data.comments) ? data.comments.map((t) => ({ ...t, messages: (t.messages || []).map((m) => (m.pending ? { ...m, pending: false, error: m.text ? undefined : "Interrupted (the page was reloaded)." } : m)) })) : []);
     return { ...data, scrollToContent: true };
-  } catch {
+  } catch (error) {
+    loadFailure = error.message;
     return null;
   }
 };
@@ -159,6 +165,7 @@ function ClaudeControls({ api }) {
               )}
               {r.maxBudget > 0 && <span className="run-cap" title="Cost cap for this answer">≤${r.maxBudget.toFixed(2)}</span>}
               <span className="run-time">{Math.round((Date.now() - r.startedAt) / 1000)}s</span>
+              {r.status === "Drawing…" && <button onClick={() => showDrawing(r.id)}>Show now</button>}
               <button className="run-cancel" title="Cancel" onClick={() => cancelAsk(r.id)}>✕</button>
             </div>
           ))}
@@ -198,7 +205,7 @@ function ClaudeControls({ api }) {
               onChange={(e) => { setCwd(e.target.value); LS.set(`whiteboard.cwd.${BOARD}`, e.target.value); }}
             />
           </label>
-          <p className="hint">Claude can read and run things in this folder when your board refers to code. It's saved for this board; leave it empty to use the default.</p>
+          <p className="hint">Enable Read project files to use this folder for one ask. The folder is saved per board.</p>
           <div className="ink-row">
             <span>Claude's ink{ink.count ? ` (${ink.count} strokes${ink.hidden ? ", hidden" : ""})` : ": none yet"}</span>
             <button className="link" disabled={!ink.count} onClick={toggleInk}>{ink.hidden ? "Show" : "Hide"} <kbd>Alt+I</kbd></button>
@@ -221,13 +228,15 @@ function ClaudeControls({ api }) {
 }
 
 export default function App() {
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { initialData.then(() => setLoaded(true)); }, []);
   const [api, setApi] = useState(null);
   const [penSettings, setPenSettings] = useState(loadPenSettings);
   const [penId, setPenId] = useState(() => LS.get("whiteboard.pen", "fountain"));
   const [penActive, setPenActive] = useState(false);
   const [stylusOnly, setStylusOnly] = useState(() => LS.get("whiteboard.stylusOnly", false));
   const [theme, setTheme] = useState("light");
-  const saveRef = useRef({ version: -1, timer: 0, thumbAt: 0 });
+  const saveRef = useRef({ version: -1, timer: 0, thumbAt: 0, dirty: false, retired: false, queue: Promise.resolve(true) });
   const [saveStatus, setSaveStatus] = useState("saved");
   const [boardsSignal, setBoardsSignal] = useState(0);
 
@@ -262,20 +271,24 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [pickPen]);
 
-  const save = useCallback(async () => {
-    if (!api) return;
+  const write = useCallback(async () => {
+    if (!api || loadFailure || saveRef.current.retired) return false;
+    saveRef.current.dirty = false;
     // a walkthrough being played hides later steps; the file always has everything visible
     const elements = withAllSteps(api.getSceneElements().filter((e) => !e.customData?.claudePending));
     const scene = JSON.parse(serializeAsJSON(elements, api.getAppState(), api.getFiles(), "local"));
-    const body = JSON.stringify({ ...scene, comments: comments.get().filter((t) => t.messages.length), picks: picks.get() });
+    const body = JSON.stringify({ ...scene, comments: comments.get().filter((t) => t.messages.length), picks: picks.get(), proposals: savedProposals() });
     setSaveStatus("saving");
     try {
-      const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body, keepalive: body.length < 60000 });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const r = await fetch(`/api/board?name=${encodeURIComponent(BOARD)}`, { method: "PUT", headers: boardRevision ? { "If-Match": boardRevision } : { "If-None-Match": "*" }, body, keepalive: body.length < 60000 });
+      if (!r.ok) throw new Error(r.status === 409 ? "Board changed in another session. Export your edits before reloading." : `Save failed (HTTP ${r.status})`);
+      boardRevision = r.headers.get("etag");
       setSaveStatus(saveRef.current.timer ? "unsaved" : "saved");
-    } catch {
+    } catch (error) {
+      saveRef.current.dirty = true;
       setSaveStatus("error");
-      return;
+      api.setToast({ message: error.message, closable: true });
+      return false;
     }
     // refresh the board's thumbnail at most every 8 seconds
     if (elements.length && Date.now() - saveRef.current.thumbAt > 8000) {
@@ -294,7 +307,32 @@ export default function App() {
         .then((blob) => fetch(`/api/board/thumb?name=${encodeURIComponent(BOARD)}`, { method: "PUT", body: blob }))
         .catch(() => {});
     }
+    return true;
   }, [api]);
+
+  const save = useCallback(() => {
+    const state = saveRef.current;
+    state.queue = state.queue.catch(() => false).then(async () => {
+      state.inFlight = true;
+      try { return await write(); }
+      catch (error) {
+        state.dirty = true;
+        setSaveStatus("error");
+        api?.setToast({ message: error.message, closable: true });
+        return false;
+      } finally { state.inFlight = false; }
+    });
+    return state.queue;
+  }, [write, api]);
+  const flushBoard = async () => {
+    const state = saveRef.current;
+    do {
+      clearTimeout(state.timer);
+      state.timer = 0;
+      if (state.dirty ? !(await save()) : !(await state.queue)) return false;
+    } while (state.dirty);
+    return true;
+  };
 
   // Ctrl+S saves the board now (files: ☰ menu → Save to…)
   useEffect(() => {
@@ -304,30 +342,30 @@ export default function App() {
         e.stopPropagation();
         clearTimeout(saveRef.current.timer);
         saveRef.current.timer = 0;
-        save()?.then(() => api?.setToast({ message: "Board saved", duration: 1500 }));
+        save()?.then((ok) => ok && api?.setToast({ message: "Board saved", duration: 1500 }));
       }
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [save, api]);
 
-  const openBoard = useCallback(
-    async (id) => {
-      if (saveRef.current.timer) {
-        clearTimeout(saveRef.current.timer);
-        saveRef.current.timer = 0;
-        await save();
-      }
-      LS.set("whiteboard.lastBoard", id);
-      const u = new URL(location.href);
-      u.searchParams.set("board", id);
-      location.href = u.toString();
-    },
-    [save],
-  );
+  const openBoard = async (id) => {
+    if (!saveRef.current.retired && !(await flushBoard())) return;
+    LS.set("whiteboard.lastBoard", id);
+    const u = new URL(location.href);
+    u.searchParams.set("board", id);
+    location.href = u.toString();
+  };
 
   useEffect(() => {
-    const flush = () => { if (saveRef.current.timer) { clearTimeout(saveRef.current.timer); save(); } };
+    const flush = (event) => {
+      const state = saveRef.current;
+      if (!state.retired && (state.dirty || state.inFlight)) {
+        event.preventDefault();
+        event.returnValue = "";
+        if (state.dirty) { clearTimeout(state.timer); state.timer = 0; save(); }
+      }
+    };
     window.addEventListener("beforeunload", flush);
     return () => window.removeEventListener("beforeunload", flush);
   }, [save]);
@@ -336,10 +374,13 @@ export default function App() {
   useEffect(() => {
     const later = () => {
       clearTimeout(saveRef.current.timer);
+      saveRef.current.dirty = true;
       setSaveStatus("unsaved");
       saveRef.current.timer = setTimeout(() => { saveRef.current.timer = 0; save(); }, 800);
     };
-    const unsubs = [comments.subscribe(later), picks.subscribe(later)];
+    let ready = false;
+    const unsubs = [comments.subscribe(later), picks.subscribe(later), onProposalsChange(() => { if (ready) later(); })];
+    ready = true;
     return () => unsubs.forEach((stop) => stop());
   }, [save]);
 
@@ -360,11 +401,14 @@ export default function App() {
       saveRef.current.version = v;
       if (first) return;
       clearTimeout(saveRef.current.timer);
+      saveRef.current.dirty = true;
       setSaveStatus("unsaved");
       saveRef.current.timer = setTimeout(() => { saveRef.current.timer = 0; save(); }, 800);
     }
   };
 
+  if (!loaded) return null;
+  if (loadFailure) return <p role="alert">Board could not be loaded ({loadFailure}). <button onClick={() => location.reload()}>Retry</button></p>;
   return (
     <div className={`app ${penActive ? "pen-active" : ""} theme-${theme}`}>
       <Excalidraw
@@ -392,7 +436,7 @@ export default function App() {
           <MainMenu.DefaultItems.Help />
         </MainMenu>
       </Excalidraw>
-      <Boards board={BOARD} status={saveStatus} onOpen={openBoard} openSignal={boardsSignal} />
+      <Boards board={BOARD} status={saveStatus} onOpen={openBoard} flush={flushBoard} retire={(value) => { saveRef.current.retired = value; }} openSignal={boardsSignal} />
       <PickHighlights view={view} />
       <CommentPins view={view} />
       {api && <SelectionBar api={api} view={view} board={BOARD} onAsk={ask} />}

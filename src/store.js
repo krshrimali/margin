@@ -35,7 +35,7 @@ export { LS };
 // Model and effort start at Claude Code's default on every load; the edit mode and cost cap are remembered.
 // `steps` (walk me through it) applies to the next ask only.
 export const prefs = createStore({
-  model: "", effort: "", editMode: LS.get("whiteboard.editMode", "auto"), maxBudget: LS.get("whiteboard.maxBudget", 0), steps: false,
+  model: "", effort: "", editMode: LS.get("whiteboard.editMode", "auto"), maxBudget: LS.get("whiteboard.maxBudget", 0), steps: false, projectAccess: false,
 });
 prefs.subscribe((p) => {
   LS.set("whiteboard.editMode", p.editMode);
@@ -44,8 +44,8 @@ prefs.subscribe((p) => {
 /** The per-ask options from the pickers; clears the one-shot "step by step" toggle. */
 export function takeAskPrefs() {
   const p = prefs.get();
-  if (p.steps) prefs.set((s) => ({ ...s, steps: false }));
-  return { model: p.model, effort: p.effort, editMode: p.editMode, maxBudget: Number(p.maxBudget) || 0, steps: p.steps };
+  if (p.steps || p.projectAccess) prefs.set((s) => ({ ...s, steps: false, projectAccess: false }));
+  return { model: p.model, effort: p.effort, editMode: p.editMode, maxBudget: Number(p.maxBudget) || 0, steps: p.steps, projectAccess: p.projectAccess };
 }
 
 /** Picked context: element groups picked from anywhere on the board, asked about together. */

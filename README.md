@@ -98,7 +98,7 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   by step: it draws the explanation in steps and a player at the bottom plays them one at a time with Claude's
   narration (**Next ▶** / **◀ Back**, or → ← and Space with nothing selected; Esc or *Show all* ends it). Saved
   boards always contain every step; *▶ Play steps* on a selected walkthrough (or the command bar) replays it.
-- **Attachments.** Every ask box has **📎 File** (PDFs, images, text, code; up to 8 files of 15 MB) and **🔗 Link**;
+- **Attachments.** Every ask box has **📎 File** (PDFs, images, text, code; up to 8 files, 15 MiB per file, 36 MiB combined) and **🔗 Link**;
   you can also drop files or links onto the box. Files are saved with the ask (`data/asks/<id>/attachments/`)
   and Claude reads them; links are fetched with WebFetch. E.g. attach a paper and ask "diagram this".
 - **Suggestions in comments.** With edits on *Ask first*, edits Claude proposes from a comment appear inside the
@@ -109,7 +109,8 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   cap, open boards. **Alt+A** opens the ask box for the selection.
 - **Live cost and a cap.** While Claude works, the status row shows input↑ / output↓ tokens and the time; cards and
   comment replies show the final cost. **Cap $** (remembered) stops an answer that would cost more
-  (`--max-budget-usd`); a stopped answer says so.
+  (`--max-budget-usd`). A capped ask picks nearby context locally and uses one Claude invocation.
+  If Claude becomes unavailable the capped ask stops.
 - **Export a thread.** ⤓ in a thread copies it as Markdown or downloads Markdown plus a PNG of the commented
   elements and everything Claude drew from the thread.
 - **Picked context is saved** with the board, like comments.
@@ -119,16 +120,15 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
   This works on your content and on its own diagrams, but not on its answer cards or on handwriting (handwriting can
   be recoloured but not retyped). A review or a question never changes your content silently. All edits from one
   answer are a single undo step (Ctrl+Z).
-- **Diagram skill.** Claude is started with `--plugin-dir agent-plugin`, which gives it the `board-diagrams` skill
-  (`agent-plugin/skills/board-diagrams/SKILL.md`). It loads the skill before drawing: when to use `<draw>` or
-  `<diagram>`, which shape means what (standard flowchart conventions plus architecture shapes, UI windows,
-  chevron stages, block arrows, triangles, octagons), braces / brackets / parens / angle brackets (single, paired
-  or standalone), colour by category (3–5 hues plus grey, red only for problems; a drawing with no colours is
-  coloured by shape kind automatically), design rules (one idea per drawing, hierarchy, reading order),
-  layout recipes (architecture, comparison, timeline, stack, cycle, pipeline, pyramid, before/after) and templates. Codex doesn't load
-  it, but gets the shape reference in its prompt.
-- **Project folder** (in the ▾ menu, saved per board): the folder Claude works in when your board refers to code.
-- Claude runs as `claude -p --dangerously-skip-permissions` (headless, all tools allowed).
+- **Drawing layouts.** Both engines receive the same guide from `agent-plugin/skills/board-diagrams/SKILL.md`.
+  Comparisons stack when space is tight. Processes use named stages and labeled connections, and annotated
+  examples reference a line in a snippet. Choose *Show now* during drawing to skip the animation.
+- **Project access.** Set the project folder in the Ask menu, then enable *Read project files* for the ask
+  that needs it. Ordinary drawings use restricted tools. Claude uses restricted mode with a per-request
+  tool list. Codex uses a read-only sandbox. Research requests can use web tools.
+- **Saving and review.** Concurrent saves check board revisions. A conflict leaves the editing session open
+  so you can export your changes. Edit previews appear as separate images. The board stores pending edits
+  and restores them after reload. Regeneration reuses saved attachment references and links from the original ask.
 
 ### When Claude is out of budget → Codex
 
@@ -157,6 +157,10 @@ Environment variables:
 Each request is logged in `data/asks/<id>/` (snapshot, prompt and result), which helps with debugging.
 
 ### Verify drawing replies
+
+Install a test browser with `npx playwright-core install chromium`, or set `CHROMIUM` to a local Chromium executable.
+`npm test` builds the app and runs repeatable browser checks against an isolated server. `npm run test:live`
+uses the installed Claude and Codex CLIs and writes laptop and narrow-screen screenshots to a temporary directory.
 
 Use the normal Ask menu on a fresh board to check these prompts at fit-to-view. Repeat with
 `WHITEBOARD_FORCE_CODEX=1` to check the fallback engine's prompt.

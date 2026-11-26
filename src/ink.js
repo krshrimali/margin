@@ -473,7 +473,7 @@ function retextInContainer(container, t, text) {
  *   {"do":"connect","from":"D2","to":"R4","label":"retry"}  {"do":"disconnect","from":"D2","to":"D3"}
  * Returns { changed: Map(id -> new element), added: [new elements], done: n, skipped: [reasons] }.
  */
-export function applyEdits({ commands, regions, elementsById }) {
+export function applyEdits({ commands, regions, elementsById, aliases = [] }) {
   const changed = new Map();
   const added = [];
   const cur = (id) => changed.get(id) || elementsById.get(id) || added.find((e) => e.id === id);
@@ -484,7 +484,8 @@ export function applyEdits({ commands, regions, elementsById }) {
   };
   const skipped = [];
   let done = 0;
-  const newRegions = new Map(); // "id" given to an added shape -> a region later commands can name
+  const outcomes = [];
+  const newRegions = new Map(aliases); // "id" given to an added shape -> a region later commands can name
   const regionOf = (id) => {
     const key = String(id || "").trim();
     if (newRegions.has(key)) return newRegions.get(key);
@@ -567,7 +568,7 @@ export function applyEdits({ commands, regions, elementsById }) {
     for (const t of ar.boundElements || []) if (t.type === "text" && cur(t.id)) set(cur(t.id), { isDeleted: true });
   };
 
-  for (const c of (commands || []).slice(0, 80)) {
+  const applyOne = (c) => {
     const act = String(c.do || c.action || "").toLowerCase();
     // ---- structural edits (they name regions with between/near/from/to, not target)
     if (["add", "insert", "connect", "link", "disconnect", "unlink"].includes(act)) {
@@ -586,6 +587,7 @@ export function applyEdits({ commands, regions, elementsById }) {
         } else {
           // add a shape: between two connected shapes, or beside one
           const between = Array.isArray(c.between) ? c.between.map(regionOf) : null;
+          if ([c.from, c.to, ...(c.between || [])].some((id) => id && !regionOf(id))) throw new Error("A referenced region is unavailable");
           const near = regionOf(c.near || c.target || (between ? null : c.from));
           const item = { shape: c.shape || "rect", text: c.text ?? c.label ?? "", color: c.color, fill: c.fill, dashed: c.dashed, bold: c.bold, at: [0, 0] };
           if (!item.text && !c.shape) throw new Error("nothing to add");
@@ -644,18 +646,19 @@ export function applyEdits({ commands, regions, elementsById }) {
       } catch (e) {
         skipped.push(`${act}: ${e.message}`);
       }
-      continue;
+      return;
     }
     const targets = (Array.isArray(c.targets) ? c.targets : [c.target]).filter(Boolean);
     const rs = targets.map(regionOf).filter(Boolean);
+    if (rs.length && rs.length < targets.length) skipped.push("Some target regions are missing");
     if (!rs.length) {
       skipped.push(`${act} ${targets.join(",")}: no such region`);
-      continue;
+      return;
     }
     try {
       for (const r of rs) {
         const members = r.ids.map(cur).filter((e) => e && !e.isDeleted);
-        if (!members.length) continue;
+        if (!members.length) { skipped.push("The target has been removed"); continue; }
         if (act === "style" || act === "color" || act === "colour" || act === "recolor" || act === "recolour") {
           const stroke = colorOf(c.stroke || c.color || c.colour);
           const fill = colorOf(c.fill || c.background);
@@ -663,6 +666,7 @@ export function applyEdits({ commands, regions, elementsById }) {
           const fillStyle = FILL_STYLES.has(c.fillStyle) ? c.fillStyle : null;
           const strokeStyle = STROKE_STYLES.has(c.strokeStyle) ? c.strokeStyle : null;
           const strokeWidth = Number(c.strokeWidth) > 0 ? Math.max(0.5, Math.min(8, Number(c.strokeWidth))) : null;
+          let styled = false;
           for (const el of members) {
             const patch = {};
             if (el.type === "text") {
@@ -680,9 +684,10 @@ export function applyEdits({ commands, regions, elementsById }) {
                 if (strokeWidth) patch.strokeWidth = strokeWidth;
               }
             }
-            if (Object.keys(patch).length) set(el, patch);
+            if (Object.keys(patch).length) { set(el, patch); styled = true; }
           }
-          done++;
+          if (styled) done++;
+          else skipped.push("The requested style does not apply to this element");
         } else if (act === "relabel" || act === "retext" || act === "rename" || act === "replace") {
           const text = String(c.text ?? c.to ?? "").trim();
           if (!text) throw new Error("no text");
@@ -722,8 +727,13 @@ export function applyEdits({ commands, regions, elementsById }) {
     } catch (e) {
       skipped.push(`${act} ${targets.join(",")}: ${e.message}`);
     }
+  };
+  for (const c of (commands || []).slice(0, 80)) {
+    const previous = done, skippedBefore = skipped.length;
+    applyOne(c);
+    outcomes.push(done === previous ? "skipped" : skipped.length > skippedBefore ? "partial" : "accepted");
   }
-  return { changed, added, done, skipped };
+  return { changed, added, done, skipped, outcomes, aliases: [...newRegions] };
 }
 
 /** Short human descriptions of edit commands, for the "apply these edits?" panel. */

@@ -219,6 +219,7 @@ function gridLayout(items, sizeOf) {
     return s;
   };
   const pos = (v, size) => {
+    if (v != null && (!Number.isFinite(Number(v)) || Math.abs(Number(v)) > 512)) throw new Error("Grid coordinate is outside the supported range");
     const i = Math.floor(Number(v) || 0), f = (Number(v) || 0) - i;
     return [start(i, size) + size(i) / 2 + f * size(i), size(i)];
   };
@@ -359,7 +360,7 @@ function sideText(text, [x, y], side, extra) {
   return { type: "text", x: pos[0], y: pos[1], text: String(text), textAlign: pos[2], ...extra };
 }
 
-function wrapText(text, width) {
+export function wrapText(text, width) {
   return String(text)
     .split("\n")
     .map((para) => {
@@ -378,31 +379,29 @@ function wrapText(text, width) {
 }
 
 // --------------------------------------------------------------- build ----
-/**
- * Build a drawing from <draw> items.
- *   items: [{title?, style?}, {id, shape, text, at, ...}, ...]
- *   prefix: unique id prefix (stable across streaming rebuilds)
- * Returns { elements, steps, stepOf, narration }:
- *   steps[i]  – element ids of item i, in drawing order (for the streaming animation)
- *   stepOf    – element id -> walkthrough step (0 = always shown), from {"step":n,"say":"…"} marker lines
- *   narration – [{ step, say }] in order
- */
-function buildComparison({ title, panels }, prefix) {
+function buildComparison({ title, panels, focus }, prefix, viewportWidth) {
   if (typeof title !== "string" || !title.trim() || !Array.isArray(panels) || panels.length !== 2 ||
       panels.some((p) => typeof p?.label !== "string" || !p.label.trim() || typeof p.body !== "string" || !p.body.trim())) {
     return { elements: [], steps: [] };
   }
 
-  const pad = 24, gap = 24, top = 72;
+  const pad = 20, gap = 24, top = 72;
+  const available = Math.max(220, viewportWidth - 64);
+  const codeColumns = Math.max(12, Math.floor((available - pad * 2) / 11));
+  const codeText = (value) => value.trimEnd().split("\n").map((line) => {
+    const parts = [];
+    for (let i = 0; i < line.length; i += codeColumns) parts.push(line.slice(i, i + codeColumns));
+    return parts.join("\n");
+  }).join("\n");
   const text = (id, value, fontSize, extra = {}) => ({
     id: `${prefix}-${id}`, type: "text", x: 0, y: 0, text: value, fontSize,
     fontFamily: FONT_FAMILY.Excalifont, strokeColor: DEFAULT_STROKE, ...extra,
   });
   const [heading, ...copy] = convertToExcalidrawElements([
-    text("title", wrapText(title.trim(), 46), 32),
+    text("title", wrapText(title.trim(), Math.min(46, Math.floor(available / 18))), 32),
     ...panels.flatMap((panel, i) => [
-      text(`label-${i}`, wrapText(panel.label.trim(), 24), 22, { strokeColor: i === 1 ? "#5639b8" : "#495057" }),
-      text(`body-${i}`, panel.code === true ? panel.body.trimEnd() : wrapText(panel.body.trim(), 34), 18,
+      text(`label-${i}`, wrapText(panel.label.trim(), 24), 22, { strokeColor: focus === i ? "#5639b8" : "#495057" }),
+      text(`body-${i}`, panel.code === true ? codeText(panel.body) : wrapText(panel.body.trim(), Math.min(34, codeColumns)), 18,
         { fontFamily: panel.code === true ? FONT_FAMILY.Cascadia : FONT_FAMILY.Nunito }),
     ]),
   ], { regenerateIds: false });
@@ -410,9 +409,10 @@ function buildComparison({ title, panels }, prefix) {
   const labelHeight = Math.max(copy[0].height, copy[2].height);
   const height = pad * 2 + labelHeight + 14 + Math.max(copy[1].height, copy[3].height);
   const y = Math.max(top, heading.height + 28);
+  const stacked = 2 * width + gap > available;
   const backgrounds = convertToExcalidrawElements(panels.map((_, i) => ({
-    id: `${prefix}-panel-${i}`, type: "rectangle", x: i * (width + gap), y, width, height,
-    strokeColor: i === 1 ? "#a591ea" : "#adb5bd", backgroundColor: i === 1 ? "#f3efff" : "#f8f9fa",
+    id: `${prefix}-panel-${i}`, type: "rectangle", x: stacked ? 0 : i * (width + gap), y: y + (stacked ? i * (height + gap) : 0), width, height,
+    strokeColor: focus === i ? "#a591ea" : "#adb5bd", backgroundColor: focus === i ? "#f3efff" : "#f8f9fa",
     fillStyle: "solid", strokeWidth: 1, roughness: 0, roundness: { type: ROUNDNESS.ADAPTIVE_RADIUS },
   })), { regenerateIds: false });
   const columns = backgrounds.map((bg, i) => {
@@ -420,16 +420,38 @@ function buildComparison({ title, panels }, prefix) {
     const [label, body] = copy.slice(i * 2, i * 2 + 2);
     return [
       { ...bg, groupIds },
-      { ...label, groupIds, x: bg.x + pad, y: y + pad },
-      { ...body, groupIds, x: bg.x + pad, y: y + pad + labelHeight + 14 },
+      { ...label, groupIds, x: bg.x + pad, y: bg.y + pad },
+      { ...body, ...(panels[i].code ? { originalText: panels[i].body.trimEnd(), autoResize: false } : {}), groupIds, x: bg.x + pad, y: bg.y + pad + labelHeight + 14 },
     ];
   });
   return { elements: [heading, ...columns.flat()], steps: [[heading.id], ...columns.map((col) => col.map((e) => e.id))] };
 }
 
-export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
+export function buildDrawing(items, { prefix, ink: forceInk = false, viewportWidth = window.innerWidth } = {}) {
+  const layout = items.find((i) => i?.layout);
+  if (layout?.layout === "example") {
+    const lines = String(layout.snippet || "").split("\n");
+    const at = Number(layout.line);
+    if (!Number.isInteger(at) || at < 1 || at > lines.length || !layout.note) throw new Error("The annotation needs a valid line and explanation.");
+    return buildComparison({ title: layout.title, focus: 1, panels: [
+      { label: layout.label || "Example", body: lines.map((line, i) => (i === at - 1 ? "› " : "  ") + line).join("\n"), code: true },
+      { label: "Line " + at, body: layout.note },
+    ] }, prefix, viewportWidth);
+  }
+  if (layout?.layout === "process") {
+    const stages = layout.stages;
+    if (!Array.isArray(stages) || stages.length < 2 || stages.length > 12 || stages.some((s) => !s.id || !s.text)) throw new Error("A process needs 2–12 named stages.");
+    const nodes = stages.map((stage, i) => ({ id: stage.id, shape: stage.decision ? "diamond" : "rounded",
+      text: stage.text, at: viewportWidth < 840 || stages.length > 4 ? [0, i] : [i, 0], color: stage.decision ? "violet" : "grey" }));
+    const edges = layout.edges || stages.slice(1).map((s, i) => ({ from: stages[i].id, to: s.id }));
+    if (!Array.isArray(edges) || !edges.length) throw new Error("The process needs connections.");
+    items = [{ title: layout.title }, ...nodes, ...edges.map((edge) => {
+      const distance = Math.abs(stages.findIndex((s) => s.id === edge.from) - stages.findIndex((s) => s.id === edge.to));
+      return { ...edge, shape: "arrow", route: distance > 1 ? "curve" : "straight" };
+    })];
+  }
   const comparison = items.find((i) => i?.layout === "comparison" && !i.shape);
-  if (comparison) return buildComparison(comparison, prefix);
+  if (comparison) return buildComparison(comparison, prefix, viewportWidth);
   const opts = items.find((i) => i && !i.shape && (i.style || i.title)) || {};
   const ink = forceInk || String(opts.style || "").toLowerCase() === "ink";
   const roughness = 1;
@@ -461,6 +483,22 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
     const lw = Math.max(90, text.length * fontSize * 0.6 + 16);
     return [Math.max(44, lw), 82 + (text ? fontSize * 1.4 : 0)];
   };
+  const occupied = new Set(), named = new Set();
+  items = items.map((raw) => {
+    if (!raw?.shape) return raw;
+    const item = norm(raw);
+    if (item.id != null) {
+      if (named.has(String(item.id))) throw new Error("Duplicate drawing ID: " + item.id);
+      named.add(String(item.id));
+    }
+    if (!SHAPES_WITH_TEXT.has(item.shape)) return item;
+    const [x, y] = item.at || [0, 0];
+    if (![x, y].every((n) => Number.isFinite(n) && Math.abs(n) <= 200)) throw new Error("Invalid grid position");
+    let row = y;
+    while (occupied.has(x + "," + row)) row++;
+    occupied.add(x + "," + row);
+    return { ...item, at: [x, row] };
+  });
   const grid = gridLayout(
     items.filter((i) => i && i.shape).map(norm),
     (item) => {
@@ -487,16 +525,18 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   const anyColour = items.some((i) => i && i.shape && (i.color || i.fill || i.stroke));
   const autoColour = !ink && !anyColour && opts.autoColor !== false;
 
-  for (const raw of items) {
-    if (!raw || typeof raw !== "object") continue;
-    if (!raw.shape) {
-      // {"step":2,"say":"…"}: everything after this belongs to step 2
-      if (raw.step != null && raw.step !== false) {
-        currentStep = Number(raw.step) > 0 ? Number(raw.step) : narration.length + 1;
-        narration.push({ step: currentStep, say: String(raw.say ?? raw.text ?? raw.note ?? "").trim() });
-      }
-      continue;
+  const nodes = [], connectors = [], expectedEdges = [];
+  for (const item of items) {
+    if (item?.step != null && !item.shape) {
+      currentStep = Number(item.step) > 0 ? Number(item.step) : narration.length + 1;
+      narration.push({ step: currentStep, say: String(item.say ?? item.text ?? "").trim() });
     }
+    if (!item?.shape) continue;
+    const queue = ["arrow", "line", "connector"].includes(item.shape) ? connectors : nodes;
+    queue.push({ raw: item, stepNumber: currentStep });
+  }
+  for (const { raw, stepNumber } of [...nodes, ...connectors]) {
+    currentStep = stepNumber;
     let shape = String(raw.shape).toLowerCase().trim();
     shape = ALIASES[shape] || shape;
     const item = { ...raw, shape };
@@ -586,7 +626,7 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
         const a = byId.get(String(item.from)), b = byId.get(String(item.to));
         const pa = a ? null : Array.isArray(item.from) ? cellCentre(item.from) : null;
         const pb = b ? null : Array.isArray(item.to) ? cellCentre(item.to) : null;
-        if ((!a && !pa) || (!b && !pb)) continue;
+        if ((!a && !pa) || (!b && !pb)) throw new Error("Missing connector endpoint: " + item.from + " → " + item.to);
         const ca = a ? [(a.box.minX + a.box.maxX) / 2, (a.box.minY + a.box.maxY) / 2] : pa;
         const cb = b ? [(b.box.minX + b.box.maxX) / 2, (b.box.minY + b.box.maxY) / 2] : pb;
         const route = String(item.route || item.curve || "straight").toLowerCase();
@@ -614,7 +654,7 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
         }
         const isArrow = shape !== "line";
         const ends = String(item.ends || "").toLowerCase();
-        push({
+        const edgeId = push({
           ...lineSkel(pts, {}),
           type: isArrow || ends === "both" ? "arrow" : "line",
           strokeColor: stroke, roughness, strokeWidth: item.bold || item.thick ? 4 : 2,
@@ -626,6 +666,7 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
           ...(b ? { end: { id: b.containerId } } : {}),
           ...(item.label || item.text ? { label: { text: String(item.label || item.text), fontSize: 16, fontFamily: font, strokeColor: textColor } } : {}),
         });
+        expectedEdges.push({ id: edgeId, start: a?.containerId, end: b?.containerId, bound: isArrow || ends === "both" });
         continue;
       }
 
@@ -774,10 +815,16 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
         continue;
       }
     } catch (e) {
-      console.warn("draw item failed", raw, e);
+      throw new Error(`Could not draw ${shape}: ${e.message}`);
     }
   }
 
+  const nodeBoxes = [...byId.values()].filter((node) => node.containerId);
+  for (let i = 0; i < nodeBoxes.length; i++) {
+    if (nodeBoxes.slice(i + 1).some((other) => overlaps(nodeBoxes[i].box, other.box))) {
+      throw new Error("Two diagram nodes overlap. Space their grid positions farther apart.");
+    }
+  }
   const skels = [...back, ...front];
   let elements;
   try {
@@ -785,6 +832,14 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   } catch (e) {
     console.warn("drawing conversion failed", e);
     return { elements: [], steps: [] };
+  }
+  const rendered = new Map(elements.map((e) => [e.id, e]));
+  for (const edge of expectedEdges) {
+    const el = rendered.get(edge.id);
+    if (!el || (edge.bound && ((edge.start && el.startBinding?.elementId !== edge.start) ||
+        (edge.end && el.endBinding?.elementId !== edge.end)))) {
+      throw new Error("A requested connection could not be rendered.");
+    }
   }
   // the title goes above whatever was drawn (curved arrows can rise above row 0)
   const titleEl = elements.find((e) => e.id.startsWith(`${prefix}-title-`));
@@ -797,6 +852,16 @@ export function buildDrawing(items, { prefix, ink: forceInk = false } = {}) {
   // labels created by the converter belong to their container's group
   const groupsOf = new Map(elements.map((e) => [e.id, e.groupIds]));
   elements = elements.map((e) => (e.containerId && !e.groupIds?.length && groupsOf.get(e.containerId)?.length ? { ...e, groupIds: [...groupsOf.get(e.containerId)] } : e));
+  // Measure converted labels so free text, annotations and bound labels share the same check.
+  const labels = elements.filter((e) => e.type === "text");
+  for (let i = 0; i < labels.length; i++) {
+    const a = labels[i];
+    for (const b of labels.slice(i + 1)) {
+      const width = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+      const height = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+      if (width > 5 && height > 5) throw new Error(`Overlapping labels: "${a.text}" and "${b.text}"`);
+    }
+  }
   // map bound texts (created by the converter for labels) to their container's step
   const itemOf = new Map();
   skels.forEach(([s, i]) => itemOf.set(s.id, i));

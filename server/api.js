@@ -9,6 +9,7 @@
 //      board and picks the ones that are relevant (and whether this is a direct follow-up).
 //   2. Answer: the main model gets the images, the board structure and the full text of only
 //      the selected answers. A direct follow-up continues (a fork of) that answer's session.
+import { REQUEST_BYTES, FILE_BYTES, ATTACHMENT_BYTES, FILE_COUNT } from "../src/limits.js";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -38,9 +39,9 @@ const FORCE_CODEX = process.env.WHITEBOARD_FORCE_CODEX === "1";
 // While Claude is out of budget, skip it until its limit resets.
 let claudeBlockedUntil = 0;
 let claudeBlockedReason = "";
-const MAX_BODY = 60 * 1024 * 1024;
+const MAX_BODY = REQUEST_BYTES;
 
-for (const d of [BOARDS_DIR, ASKS_DIR, CLAUDE_CWD]) fs.mkdirSync(d, { recursive: true });
+for (const d of [BOARDS_DIR, ASKS_DIR, CLAUDE_CWD, path.join(DATA_DIR, "workspace")]) fs.mkdirSync(d, { recursive: true });
 
 const safeName = (n) => (String(n || "default").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default");
 // Board metadata (title, element count) lives next to the board file.
@@ -77,8 +78,7 @@ function readBody(req) {
     req.on("data", (c) => {
       size += c.length;
       if (size > MAX_BODY) {
-        reject(new Error("body too large"));
-        req.destroy();
+        reject(Object.assign(new Error("Request exceeds 60 MiB including images and attachments."), { status: 413 }));
       } else chunks.push(c);
     });
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
@@ -96,7 +96,7 @@ function runClaude({ content, args, cwd, timeoutMs, onEvent, onChild }) {
   return new Promise((resolve, reject) => {
     const fullArgs = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-      "--dangerously-skip-permissions", ...args,
+      "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", ...args,
     ];
     const child = spawn(CLAUDE_BIN, fullArgs, { cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
     onChild?.(child);
@@ -133,7 +133,7 @@ function runClaude({ content, args, cwd, timeoutMs, onEvent, onChild }) {
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
-      if (result && !result.is_error) return resolve(result);
+      if (result && !result.is_error && !/^error/i.test(result.subtype || "")) return resolve(result);
       if (signal) return reject(new Error("cancelled"));
       const msg = (result && (result.result || result.subtype)) || err.trim() || `claude exited with code ${code}`;
       const e = new Error(String(msg).slice(0, 2000));
@@ -168,17 +168,28 @@ const canFallback = () => FALLBACK === "codex";
  * Run `codex exec` non-interactively. Images are attached as files. Resolves
  * with { text, threadId } where text is Codex's final message.
  */
-function runCodex({ prompt, images, cwd, schema, timeoutMs, onStatus, onChild, workDir }) {
-  return new Promise(async (resolve, reject) => {
-    const args = ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", cwd];
-    if (CODEX_MODEL) args.push("-m", CODEX_MODEL);
-    if (schema) {
-      const f = path.join(workDir, "codex-schema.json");
-      await fsp.writeFile(f, JSON.stringify(schema));
-      args.push("--output-schema", f, "--ephemeral");
-    }
-    for (const img of images) args.push("--image", img);
-    args.push("--", "-"); // prompt from stdin
+function codexPermissions(cwd, workDir) {
+  // The Linux sandbox re-executes the CLI inside its mount namespace.
+  const executable = path.isAbsolute(CODEX_BIN) ? CODEX_BIN
+    : (process.env.PATH || "").split(path.delimiter).map((dir) => path.join(dir, CODEX_BIN)).find((f) => fs.existsSync(f));
+  const roots = new Set([cwd, workDir, "/bin", "/usr", "/lib", "/lib64"]);
+  if (executable) roots.add(fs.realpathSync(executable));
+  const grants = [...roots].map((dir) => JSON.stringify(dir) + '="read"');
+  return ["-c", 'default_permissions="margin"', "-c", 'permissions.margin.filesystem={":root"="none",":minimal"="read",' + grants.join(",") + '}',
+    "-c", "permissions.margin.network.enabled=false", "-c", 'shell_environment_policy.inherit="none"'];
+}
+async function runCodex({ prompt, images, cwd, schema, timeoutMs, onStatus, onChild, workDir, readFiles = false, research = false }) {
+  const args = ["exec", "--json", "--skip-git-repo-check", ...codexPermissions(cwd, workDir), "--ignore-user-config", "--ignore-rules", "--disable", "plugins", "--disable", "multi_agent", "-c", `web_search="${research ? "live" : "disabled"}"`, "-C", cwd];
+  if (!readFiles) args.push("--disable", "shell_tool", "--disable", "unified_exec");
+  if (CODEX_MODEL) args.push("-m", CODEX_MODEL);
+  if (schema) {
+    const f = path.join(workDir, "codex-schema.json");
+    await fsp.writeFile(f, JSON.stringify(schema));
+    args.push("--output-schema", f, "--ephemeral");
+  }
+  for (const img of images) args.push("--image", img);
+  args.push("--", "-"); // prompt from stdin
+  return new Promise((resolve, reject) => {
     const child = spawn(CODEX_BIN, args, { cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
     onChild?.(child);
     let buf = "", err = "", text = "", threadId = null, failure = null;
@@ -268,7 +279,7 @@ followUpOf: the single id the new content directly continues (it points at or re
     const schema = { ...SELECT_SCHEMA, required: ["relevant", "followUpOf", "reason"], additionalProperties: false };
     const r = await runCodex({
       prompt: `The attached images are, in order: ${focusB64 ? "FOCUS, CONTEXT" : "BOARD"}.\n\n${text}`,
-      images: imagePaths, cwd: CLAUDE_CWD, schema, timeoutMs: SELECT_TIMEOUT_MS * 2, onChild, workDir,
+      images: imagePaths, cwd: workDir, schema, timeoutMs: SELECT_TIMEOUT_MS * 2, onChild, workDir,
     });
     out = JSON.parse(r.text);
   } else {
@@ -339,21 +350,7 @@ Decide from the request whether an edit is wanted. When the user asks to change 
   off: `EDITING IS OFF. The user has not allowed you to change existing content. Don't output <edit>. If a change would help, mark it with ink or say it in the card, and mention that they can allow edits in the ▾ menu.`,
 };
 
-const DRAW_HELP = `FREEFORM DRAWING (<draw>): when a picture explains better than a flowchart (an explainer, a comparison, a labelled concept sketch, an architecture with databases, clouds, users and braces, a timeline, a table), draw it with shapes. One JSON object per line inside <draw></draw>; the first line may set options. Positions are grid cells: "at":[col,row], fractions allowed, one cell is about 220×140 px; shapes are centred in their cell. Write items in reading order: they are drawn one by one as they stream in.
-  {"title":"How a CDN serves a page","style":"color"}                 options: style "color" (default, coloured fills) or "ink" (your violet pen)
-  {"id":"u","shape":"person","text":"Visitor","at":[0,1]}
-  {"id":"e","shape":"cloud","text":"Edge cache","at":[1,1],"color":"blue"}
-  {"id":"o","shape":"cylinder","text":"Origin DB","at":[2,1],"color":"green"}
-  {"shape":"arrow","from":"u","to":"e","label":"GET /"}
-  {"shape":"arrow","from":"e","to":"o","label":"miss","dashed":true}
-  {"shape":"brace","around":["e","o"],"side":"bottom","text":"only on a cache miss"}
-  {"shape":"note","text":"Hit ratio ~95%","at":[1,2.2],"color":"yellow"}
-Shapes with text (pick by meaning, and use the whole range, not rect for everything): rect, rounded, pill (start/end), ellipse, circle, diamond (decision), parallelogram (input/output), trapezoid (manual step), cylinder (database/storage), queue (queue/stream), document, hexagon (preparation/config), subroutine, cloud (internet/external service), person (user/actor), note (sticky note), callout (speech bubble), triangle (hierarchy, warning, a pyramid level), chevron (a stage in a pipeline/process row), blockarrow (a big "leads to"/"becomes" arrow with text), octagon (stop, blocked, a hard limit), window (a UI screen, web page or app). Others: text (free text; "size":"s|m|l|xl"), title (big heading), arrow / line (from,to ids; "label", "dashed", "thick", "ends":"both", "route":"straight|curve|elbow"), group (a dashed box around ids with a title: "around":[ids],"text"), table ("rows":[["Head","Head"],["a","b"]], "at"), check / cross / star / warning (small marks, "at" or "near":id), number (a numbered circle "text":"1", "near":id).
-Brackets: brace (curly { }), bracket (square [ ]), paren (round ( )), angle (⟨ ⟩). Keys: "around":[ids] or "from":[c,r],"to":[c,r] or standalone "at":[c,r] with "span":cells; "side":"left|right|top|bottom", or "both" for a matching pair enclosing the items (a set, a list, a tuple, a vector); "text" is written at the tip; "color", "bold". Use braces to summarise a range ("Phase 1", "one round trip"), a pair to show "these belong together as one value".
-Item keys: "w"/"h" in cells to make a shape bigger (default 0.75×0.5), "color": red, orange, yellow, green, teal, cyan, blue, violet, purple, pink, grey (or a hex), "fill":"none" for an outline only, "bold":true for a thick border, "dashed":true.
-COLOUR: give each kind of thing its own colour so the picture reads at a glance: e.g. people violet, your services blue, data teal, external grey, decisions orange, notes yellow, the problem red, the fix green. A drawing with several kinds of things should use 3–5 colours (plus grey); one colour for everything is wrong unless you chose style "ink". Same kind → same colour; say what a colour means in a label or a small legend. Brackets, groups and arrows can be coloured too (colour a brace like the items it summarises). If you give no colours at all, the app colours shapes by kind automatically.
-STEP-BY-STEP: to walk the user through something, split the drawing into steps with marker lines {"step":1,"say":"First the browser asks DNS for the IP."}; every item after a marker belongs to that step, items before the first marker are always shown. The user plays the steps one at a time with your "say" narration (one or two sentences each). Use 3–7 steps. Use steps whenever the user asks to explain step by step, walk through, teach or animate a process.
-Before drawing, load the board-diagrams skill for the shape vocabulary, colour rules and layout templates. At most ~30 items (excluding step markers).`;
+const DRAW_HELP = fs.readFileSync(path.join(AGENT_PLUGIN_DIR, "skills/board-diagrams/SKILL.md"), "utf8").replace(/^---[\s\S]*?---\s*/, "");
 
 function regionText(regions) {
   if (!regions?.length) return "";
@@ -369,7 +366,7 @@ const threadText = (thread) =>
     .map((m) => `${m.author === "claude" ? "You" : "User"}: ${String(m.text || "").slice(0, 1500)}`)
     .join("\n");
 
-function buildPrompt({ hasFocus, focusCount = 1, summary, question, scope, earlier, cwd, resumed, regions, engine = "claude", editMode = "auto", thread, attachments = [], links = [], steps = false }) {
+function buildPrompt({ hasFocus, focusCount = 1, summary, question, scope, earlier, cwd, resumed, regions, engine = "claude", projectAccess = false, editMode = "auto", thread, attachments = [], links = [], steps = false }) {
   const comment = !!thread;
   const images = hasFocus
     ? `- FOCUS image${focusCount > 1 ? `s 1–${focusCount}` : ""}: ${SCOPE_LABEL[scope] || SCOPE_LABEL.new}.${focusCount > 1 ? " The user picked these parts from different places on the board; treat them together." : ""} Respond to this.
@@ -380,8 +377,6 @@ function buildPrompt({ hasFocus, focusCount = 1, summary, question, scope, earli
     : "(none relevant)";
   const edit = EDIT_POLICY[editMode] || EDIT_POLICY.auto;
   const canEdit = regions?.length && editMode !== "off";
-  const skill = engine === "claude" ? " Before writing a <diagram> or <draw>, load the board-diagrams skill: it lists the shapes, colours and layouts that work on the board, with templates." : "";
-
   const intro = comment
     ? `You live inside a hand-drawn whiteboard app. The user attached a COMMENT THREAD to part of the board (the FOCUS image) and is talking to you in it. Your reply goes into the thread, like a reply in a design tool's comments.
 
@@ -415,17 +410,9 @@ How to respond:
 - Start with the answer itself. Don't restate the question, and don't open with "What I see".
 - ${comment ? "Reply like a colleague in a comment thread: 1–5 short sentences or bullets, about 80 words at most. If they asked you to draw, edit or mark something up, do it with the blocks below and say in one line what you did." : "Keep it short: about 120 words, in short bullets (up to 200 for research or an explanation the user asked for). The user can ask for more detail."}
 - Use plain text only, with no markdown (#, **, backticks, tables or links). Use "- " bullets, "1." lists and, rarely, a short CAPITALISED label.
-- Draw when the user asks you to draw, sketch, diagram, visualise or explain something visual, or is designing a system, flow or process and a corrected version would help more than words. Never for plain Q&A. Two ways, use at most one per answer:
-  - <diagram>: Mermaid (flowchart, sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram), laid out automatically. Best for processes with decisions, message sequences, state machines and data models. At most 12 nodes, no subgraphs, edge labels of 3 words or fewer, one arrow per pair of nodes, prefer "flowchart TD". Use the neutral default for simple flows and classDef where colour adds meaning (e.g. classDef bad fill:#ffc9c9,stroke:#e03131). Use the node shapes that fit (A[(DB)], A{{config}}, A[/input/], A([start]), A((event)), A[[sub-process]]).
-  - <draw>: freeform shapes you place yourself (see below). Best for explainers, architectures with distinct kinds of things (people, clouds, databases, documents), comparisons, tables, timelines and annotated concepts.${skill}
-- On a drawing reply, the visual is the main answer. Give it a takeaway title and put one short caption in <answer> (up to 30 words, excluding sources). Use that caption for the insight or example that the visual alone cannot convey. For a Mermaid title, use a first-line comment such as "%% title: Cache misses reach the origin".
-- For a two-way comparison, before/after, or two versions of an example, prefer the comparison template below. Use <draw> with step markers instead when the user asks for a walkthrough.
-- Tools: most answers need none. Use WebSearch/WebFetch for research requests, and read files only when the board refers to a specific codebase, file or project. Your working directory (the user's project folder) is ${cwd}.
+- Tools: most answers need none. Use WebSearch/WebFetch for research requests, and read files only when the board refers to a specific codebase, file or project. ${projectAccess ? "The user enabled reads from " + cwd + "." : "Project access is off for this ask."}
 
 ${DRAW_HELP}
-
-COMPARISON TEMPLATE: emit exactly one JSON object inside <draw>. Margin lays out the two panels and styles the second as the focus. Use short labels and 2–6 short lines per panel; use "code":true for literal snippets, with indentation and escaped newlines.
-{"layout":"comparison","title":"Let chains read left to right","panels":[{"label":"Nested checks","body":"if let Some(x) = value {\\n  if x > 0 { use_it(x); }\\n}","code":true},{"label":"Let chain","body":"if let Some(x) = value\\n  && x > 0 { use_it(x); }","code":true}]}
 
 Output format (exactly):
 <answer>
@@ -548,13 +535,13 @@ async function handleAsk(req, res) {
   const editMode = EDIT_MODES.has(body.editMode) ? body.editMode : "auto";
   // A comment thread: the reply goes into the thread instead of a card.
   const thread = body.thread && Array.isArray(body.thread.messages) ? body.thread : null;
-  const steps = !!body.steps;
+  let steps = !!body.steps;
   // Cost cap for this answer (Claude Code stops when it's reached).
   const maxBudget = Number(body.maxBudget) > 0 ? Math.min(100, Number(body.maxBudget)) : 0;
-  const links = (Array.isArray(body.links) ? body.links : []).map(String).filter((u) => /^https?:\/\/\S+$/i.test(u)).slice(0, 8);
+  let links = (Array.isArray(body.links) ? body.links : []).map(String).filter((u) => /^https?:\/\/\S+$/i.test(u)).slice(0, 8);
 
-  let cwd = CLAUDE_CWD;
-  if (body.cwd?.trim()) {
+  let cwd = body.projectAccess === true ? CLAUDE_CWD : path.join(DATA_DIR, "workspace");
+  if (body.projectAccess && body.cwd?.trim()) {
     cwd = path.resolve(expandHome(body.cwd.trim()));
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) return send(res, 400, { error: `Project folder not found: ${cwd}` });
   }
@@ -567,14 +554,37 @@ async function handleAsk(req, res) {
   if (marksB64) await fsp.writeFile(path.join(dir, "marks.png"), Buffer.from(marksB64, "base64"));
   // Files the user attached: saved next to the ask so Claude can Read them (it has --add-dir on this folder).
   const attachmentPaths = [];
-  for (const [i, a] of (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 8).entries()) {
-    const m = /^data:([^;,]*)(?:;base64)?,(.*)$/s.exec(a?.data || "");
-    if (!m) continue;
-    const name = `${i + 1}-${String(a.name || "file").replace(/[^\w.\- ]/g, "_").slice(0, 80)}`;
-    const f = path.join(dir, "attachments", name);
-    await fsp.mkdir(path.dirname(f), { recursive: true });
-    await fsp.writeFile(f, Buffer.from(m[2], a.data.includes(";base64,") ? "base64" : "utf8"));
-    attachmentPaths.push(f);
+  let total = 0;
+  async function attach(name, bytes) {
+    total += bytes.length;
+    if (bytes.length > FILE_BYTES || total > ATTACHMENT_BYTES || attachmentPaths.length >= FILE_COUNT) {
+      throw Object.assign(new Error("Attachment limit: 8 files, 15 MiB per file, 36 MiB combined."), { status: 413 });
+    }
+    const folder = path.join(dir, "attachments");
+    await fsp.mkdir(folder, { recursive: true });
+    const file = path.join(folder, (attachmentPaths.length + 1) + "-" + path.basename(name).replace(/[^\w.\- ]/g, "_").slice(0, 80));
+    await fsp.writeFile(file, bytes);
+    attachmentPaths.push(file);
+  }
+  const replayId = body.replayId || body.legacyReplayId;
+  if (replayId) {
+    if (!/^\d{4}-[\dTZ-]+-[a-f0-9]{6}$/.test(replayId)) return send(res, 400, { error: "Invalid original ask ID" });
+    const original = path.join(ASKS_DIR, replayId);
+    const log = await fsp.readFile(path.join(original, "inputs.json"), "utf8")
+      .catch(() => fsp.readFile(path.join(original, "result.json"), "utf8")).then(JSON.parse).catch(() => null);
+    if (!log && body.replayId) return send(res, 404, { error: "Original ask inputs are unavailable" });
+    steps ||= Boolean(log?.steps);
+    links = [...new Set([...(log?.links || []), ...links])];
+    if (links.length > 8) return send(res, 400, { error: "An ask can include up to 8 links." });
+    for (const old of log?.attachments || []) {
+      const name = path.basename(old);
+      await attach(name.replace(/^\d+-/, ""), await fsp.readFile(path.join(original, "attachments", name)));
+    }
+  }
+  for (const a of body.attachments || []) {
+    const m = /^data:[^,]*;base64,([A-Za-z0-9+/=]*)$/.exec(a?.data || "");
+    if (!m) return send(res, 400, { error: "Invalid attachment data" });
+    await attach(String(a.name || "file"), Buffer.from(m[1], "base64"));
   }
   const extraFocusPaths = [];
   for (const [i, b64] of extraFocusB64.entries()) {
@@ -606,7 +616,10 @@ async function handleAsk(req, res) {
   try {
     // ---- step 1: pick relevant earlier answers
     let selection = { relevant: prior.map((p) => p.id), followUpOf: null, reason: "few answers, all passed", cost: 0 };
-    if (prior.length > 2) {
+    if (maxBudget && prior.length > 2) {
+      selection.relevant = [...prior].sort((a,b) => a.dist - b.dist).slice(0, 5).map((p) => p.id);
+      selection.reason = "Nearest context selected locally for capped ask";
+    } else if (prior.length > 2) {
       emit({ type: "status", text: "Picking relevant context…" });
       const selArgs = { prior, focusB64, contextB64, summary, question, onChild: track, imagePaths: selectImages, workDir: dir };
       try {
@@ -640,13 +653,21 @@ async function handleAsk(req, res) {
       : prior.find((p) => p.id === selection.followUpOf);
     const canResume = parent?.sessionId && (parent.engine || "claude") === "claude" && path.resolve(parent.cwd || CLAUDE_CWD) === cwd;
     const promptArgs = {
+      projectAccess: body.projectAccess === true,
       hasFocus: !!focusB64, focusCount: 1 + extraFocusB64.length, summary, question, scope, earlier, cwd,
       regions: marksB64 ? regions : [], editMode, thread, attachments: attachmentPaths, links, steps,
     };
+    const research = links.length > 0 || /\b(research|look up|search (online|the web)|latest|online)\b/i.test(question || "");
+    const project = body.projectAccess === true;
+    const readFiles = project || attachmentPaths.length > 0;
     const answer = async (resume) => {
       const prompt = buildPrompt({ ...promptArgs, resumed: resume });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
-      const args = ["--add-dir", dir, "--plugin-dir", AGENT_PLUGIN_DIR];
+      const tools = [...(readFiles ? ["Read"] : []), ...(project ? ["Grep", "Glob"] : []), ...(research ? ["WebSearch", "WebFetch"] : [])];
+      const allowed = [...(project ? [`Read(/${cwd}/**)`, "Grep", "Glob"] : []),
+        ...attachmentPaths.map((f) => `Read(/${f})`), ...(research ? ["WebSearch", "WebFetch"] : [])];
+      const args = ["--tools", tools.join(","), "--add-dir", dir];
+      if (allowed.length) args.push("--allowedTools", ...allowed);
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
       if (maxBudget) args.push("--max-budget-usd", String(maxBudget));
@@ -724,7 +745,7 @@ async function handleAsk(req, res) {
       const prompt = buildPrompt({ ...promptArgs, resumed: false, engine: "codex" });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
       const r = await runCodex({
-        prompt, images: answerImages, cwd, timeoutMs: CLAUDE_TIMEOUT_MS, onChild: track, workDir: dir,
+        prompt, images: answerImages, cwd: project ? cwd : dir, readFiles, research, timeoutMs: CLAUDE_TIMEOUT_MS, onChild: track, workDir: dir,
         onStatus: (t) => emit({ type: "status", text: t }),
       });
       const vis = visibleAnswer(r.text);
@@ -739,7 +760,7 @@ async function handleAsk(req, res) {
         try {
           result = await answer(canResume);
         } catch (e) {
-          if (!canResume || cancelled || e.budget || e.capHit) throw e;
+          if (maxBudget || !canResume || cancelled || e.budget || e.capHit) throw e;
           console.warn(`[ask ${id}] resume failed, answering fresh:`, e.message);
           result = await answer(false);
         }
@@ -747,10 +768,12 @@ async function handleAsk(req, res) {
       } catch (e) {
         if (!e.budget || !canFallback() || cancelled) throw e;
         markClaudeBlocked(e);
+        if (maxBudget) throw new Error("Claude is unavailable and Codex cannot enforce this cost cap.");
         emit({ type: "status", text: "Claude is out of budget, switching to Codex…" });
         result = await answerWithCodex();
       }
     } else if (canFallback()) {
+      if (maxBudget) throw new Error("Claude is unavailable and Codex cannot enforce this cost cap.");
       emit({
         type: "status",
         text: FORCE_CODEX ? "Answering with Codex…" : `Claude is out of budget until ${new Date(claudeBlockedUntil).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}, using Codex…`,
@@ -763,12 +786,14 @@ async function handleAsk(req, res) {
     if (editMode === "off") parsed.edits = [];
     log.result = result;
     log.engine = result.engine;
+    await fsp.writeFile(path.join(dir, "inputs.json"), JSON.stringify({ attachments: attachmentPaths, links, steps }));
     const costUsd = (result.total_cost_usd || 0) + (selection.cost || 0);
     console.log(`[ask ${id}] done in ${((Date.now() - started) / 1000).toFixed(1)}s, context ${selection.relevant.length}/${prior.length}`);
     emit({
       type: "done",
       id,
       ...parsed,
+      inputRef: attachmentPaths.length || links.length ? id : null,
       durationMs: Date.now() - started,
       costUsd,
       sessionId: result.session_id ?? null,
@@ -793,6 +818,15 @@ async function handleAsk(req, res) {
   }
 }
 
+const writes = new Map();
+async function withBoardLock(id, work) {
+  const task = (writes.get(id) || Promise.resolve()).catch(() => {}).then(work);
+  writes.set(id, task);
+  try { return await task; }
+  finally { if (writes.get(id) === task) writes.delete(id); }
+}
+const revision = (bytes) => '"' + crypto.createHash("sha256").update(bytes).digest("hex") + '"';
+
 export async function apiHandler(req, res, next) {
   const url = new URL(req.url, "http://localhost");
   if (!url.pathname.startsWith("/api/")) return next?.();
@@ -807,18 +841,28 @@ export async function apiHandler(req, res, next) {
       const file = path.join(BOARDS_DIR, `${safeName(url.searchParams.get("name"))}.excalidraw`);
       if (req.method === "GET") {
         if (!fs.existsSync(file)) return send(res, 404, { error: "not found" });
-        res.writeHead(200, { "content-type": "application/json" });
-        return fs.createReadStream(file).pipe(res);
+        const bytes = await fsp.readFile(file);
+        res.writeHead(200, { "content-type": "application/json", etag: revision(bytes) });
+        return res.end(bytes);
       }
       if (req.method === "PUT" || req.method === "POST") {
         const body = await readBody(req);
         const parsed = JSON.parse(body); // validate
-        const tmp = `${file}.tmp`;
-        await fsp.writeFile(tmp, body);
-        await fsp.rename(tmp, file);
         const id = safeName(url.searchParams.get("name"));
-        await writeMeta(id, { elements: (parsed.elements || []).filter((e) => !e.isDeleted).length });
-        return send(res, 200, { ok: true, savedAt: Date.now() });
+        if (!Array.isArray(parsed.elements)) return send(res, 400, { error: "Missing board elements" });
+        return await withBoardLock(id, async () => {
+          const exists = fs.existsSync(file);
+          if ((req.headers["if-none-match"] === "*" && exists) ||
+              (req.headers["if-match"] && (!exists || req.headers["if-match"] !== revision(await fsp.readFile(file))))) {
+            return send(res, 409, { error: "Board changed in another session. Export your edits before reloading." });
+          }
+          const tmp = file + "." + crypto.randomUUID() + ".tmp";
+          try { await fsp.writeFile(tmp, body); await fsp.rename(tmp, file); }
+          finally { await fsp.rm(tmp, { force: true }); }
+          await writeMeta(id, { elements: parsed.elements.filter((e) => !e.isDeleted).length });
+          res.setHeader("etag", revision(body));
+          return send(res, 200, { ok: true, savedAt: Date.now() });
+        });
       }
     }
     // ---------------------------------------------------------------- boards
@@ -845,20 +889,23 @@ export async function apiHandler(req, res, next) {
     }
     if (url.pathname === "/api/boards" && req.method === "POST") {
       const { title = "Untitled board", from } = JSON.parse((await readBody(req)) || "{}");
-      const id = await uniqueId(title);
-      const src = from ? path.join(BOARDS_DIR, `${safeName(from)}.excalidraw`) : null;
-      if (src && fs.existsSync(src)) {
-        await fsp.copyFile(src, path.join(BOARDS_DIR, `${id}.excalidraw`));
-        const thumb = path.join(BOARDS_DIR, `${safeName(from)}.png`);
-        if (fs.existsSync(thumb)) await fsp.copyFile(thumb, path.join(BOARDS_DIR, `${id}.png`));
-      } else {
-        await fsp.writeFile(
-          path.join(BOARDS_DIR, `${id}.excalidraw`),
-          JSON.stringify({ type: "excalidraw", version: 2, source: "claude-whiteboard", elements: [], appState: {}, files: {} }),
-        );
-      }
-      await writeMeta(id, { title: String(title).slice(0, 120), elements: from ? (await readMeta(safeName(from))).elements ?? null : 0 });
-      return send(res, 200, { id });
+      return await withBoardLock("board creation", async () => {
+        const id = await uniqueId(title);
+        const src = from ? path.join(BOARDS_DIR, `${safeName(from)}.excalidraw`) : null;
+        if (src && !fs.existsSync(src)) return send(res, 404, { error: "Source board no longer exists" });
+        if (src) {
+          await fsp.copyFile(src, path.join(BOARDS_DIR, `${id}.excalidraw`));
+          const thumb = path.join(BOARDS_DIR, `${safeName(from)}.png`);
+          if (fs.existsSync(thumb)) await fsp.copyFile(thumb, path.join(BOARDS_DIR, `${id}.png`));
+        } else {
+          await fsp.writeFile(
+            path.join(BOARDS_DIR, `${id}.excalidraw`),
+            JSON.stringify({ type: "excalidraw", version: 2, source: "claude-whiteboard", elements: [], appState: {}, files: {} }),
+          );
+        }
+        await writeMeta(id, { title: String(title).slice(0, 120), elements: from ? (await readMeta(safeName(from))).elements ?? null : 0 });
+        return send(res, 200, { id });
+      });
     }
     const m = /^\/api\/boards\/([a-zA-Z0-9_-]+)$/.exec(url.pathname);
     if (m) {
@@ -867,17 +914,19 @@ export async function apiHandler(req, res, next) {
       if (!fs.existsSync(file)) return send(res, 404, { error: "no such board" });
       if (req.method === "PATCH") {
         const { title } = JSON.parse(await readBody(req));
-        await writeMeta(id, { title: String(title || "").trim().slice(0, 120) || id });
+        await withBoardLock(id, () => writeMeta(id, { title: String(title || "").trim().slice(0, 120) || id }));
         return send(res, 200, { ok: true });
       }
       if (req.method === "DELETE") {
-        const trash = path.join(DATA_DIR, "trash", `${id}-${Date.now()}`);
-        await fsp.mkdir(trash, { recursive: true });
-        for (const ext of [".excalidraw", ".meta.json", ".png"]) {
-          const f = path.join(BOARDS_DIR, id + ext);
-          if (fs.existsSync(f)) await fsp.rename(f, path.join(trash, id + ext));
-        }
-        return send(res, 200, { ok: true, trash });
+        return await withBoardLock(id, async () => {
+          const trash = path.join(DATA_DIR, "trash", `${id}-${Date.now()}`);
+          await fsp.mkdir(trash, { recursive: true });
+          for (const ext of [".excalidraw", ".meta.json", ".png"]) {
+            const f = path.join(BOARDS_DIR, id + ext);
+            if (fs.existsSync(f)) await fsp.rename(f, path.join(trash, id + ext));
+          }
+          return send(res, 200, { ok: true, trash });
+        });
       }
     }
     if (url.pathname === "/api/board/thumb") {
@@ -889,9 +938,18 @@ export async function apiHandler(req, res, next) {
       }
       if (req.method === "PUT") {
         const chunks = [];
-        for await (const c of req) chunks.push(c);
-        await fsp.writeFile(file, Buffer.concat(chunks));
-        return send(res, 200, { ok: true });
+        let bytes = 0;
+        for await (const c of req) {
+          bytes += c.length;
+          if (bytes > MAX_BODY) return send(res, 413, { error: "Thumbnail exceeds request limit." });
+          chunks.push(c);
+        }
+        const id = safeName(url.searchParams.get("name"));
+        return await withBoardLock(id, async () => {
+          if (!fs.existsSync(path.join(BOARDS_DIR, id + ".excalidraw"))) return send(res, 404, { error: "Board no longer exists" });
+          await fsp.writeFile(file, Buffer.concat(chunks));
+          return send(res, 200, { ok: true });
+        });
       }
     }
 
@@ -899,6 +957,6 @@ export async function apiHandler(req, res, next) {
     send(res, 404, { error: "unknown endpoint" });
   } catch (e) {
     console.error(e);
-    if (!res.headersSent) send(res, 500, { error: e.message });
+    if (!res.headersSent) send(res, e.status || 500, { error: e.message });
   }
 }
