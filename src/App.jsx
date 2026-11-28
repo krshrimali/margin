@@ -205,7 +205,7 @@ function ClaudeControls({ api }) {
               onChange={(e) => { setCwd(e.target.value); LS.set(`whiteboard.cwd.${BOARD}`, e.target.value); }}
             />
           </label>
-          <p className="hint">Enable Read project files to use this folder for one ask. The folder is saved per board.</p>
+          <p className="hint">Claude starts in this folder and can read any directory on this machine. The folder is saved per board.</p>
           <div className="ink-row">
             <span>Claude's ink{ink.count ? ` (${ink.count} strokes${ink.hidden ? ", hidden" : ""})` : ": none yet"}</span>
             <button className="link" disabled={!ink.count} onClick={toggleInk}>{ink.hidden ? "Show" : "Hide"} <kbd>Alt+I</kbd></button>

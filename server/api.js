@@ -25,6 +25,10 @@ const ASKS_DIR = path.join(DATA_DIR, "asks");
 const CLAUDE_CWD = path.resolve(process.env.CLAUDE_CWD || path.join(DATA_DIR, "workspace"));
 // Plugin with the skills the answering agent can load (e.g. board-diagrams).
 const AGENT_PLUGIN_DIR = path.join(ROOT, "agent-plugin");
+// Filesystem roots Claude may read from: every drive on Windows, "/" elsewhere.
+const FS_ROOTS = process.platform === "win32"
+  ? [..."ABCDEFGHIJKLMNOPQRSTUVWXYZ"].map((d) => `${d}:\\`).filter((r) => fs.existsSync(r))
+  : ["/"];
 const CLAUDE_BIN = process.env.CLAUDE_BIN || "claude";
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL || "";
 const SELECT_MODEL = process.env.CLAUDE_SELECT_MODEL || "haiku";
@@ -96,7 +100,7 @@ function runClaude({ content, args, cwd, timeoutMs, onEvent, onChild }) {
   return new Promise((resolve, reject) => {
     const fullArgs = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-      "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", ...args,
+      "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--setting-sources", "", ...args,
     ];
     const child = spawn(CLAUDE_BIN, fullArgs, { cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
     onChild?.(child);
@@ -168,7 +172,12 @@ const canFallback = () => FALLBACK === "codex";
  * Run `codex exec` non-interactively. Images are attached as files. Resolves
  * with { text, threadId } where text is Codex's final message.
  */
-function codexPermissions(cwd, workDir) {
+function codexPermissions(cwd, workDir, readAnywhere = false) {
+  // Project access: the whole filesystem is readable (still read-only, no network).
+  if (readAnywhere) {
+    return ["-c", 'default_permissions="margin"', "-c", 'permissions.margin.filesystem={":root"="read"}',
+      "-c", "permissions.margin.network.enabled=false", "-c", 'shell_environment_policy.inherit="none"'];
+  }
   // The Linux sandbox re-executes the CLI inside its mount namespace.
   const executable = path.isAbsolute(CODEX_BIN) ? CODEX_BIN
     : (process.env.PATH || "").split(path.delimiter).map((dir) => path.join(dir, CODEX_BIN)).find((f) => fs.existsSync(f));
@@ -178,8 +187,8 @@ function codexPermissions(cwd, workDir) {
   return ["-c", 'default_permissions="margin"', "-c", 'permissions.margin.filesystem={":root"="none",":minimal"="read",' + grants.join(",") + '}',
     "-c", "permissions.margin.network.enabled=false", "-c", 'shell_environment_policy.inherit="none"'];
 }
-async function runCodex({ prompt, images, cwd, schema, timeoutMs, onStatus, onChild, workDir, readFiles = false, research = false }) {
-  const args = ["exec", "--json", "--skip-git-repo-check", ...codexPermissions(cwd, workDir), "--ignore-user-config", "--ignore-rules", "--disable", "plugins", "--disable", "multi_agent", "-c", `web_search="${research ? "live" : "disabled"}"`, "-C", cwd];
+async function runCodex({ prompt, images, cwd, schema, timeoutMs, onStatus, onChild, workDir, readFiles = false, readAnywhere = false, research = false }) {
+  const args = ["exec", "--json", "--skip-git-repo-check", ...codexPermissions(cwd, workDir, readAnywhere), "--ignore-user-config", "--ignore-rules", "--disable", "plugins", "--disable", "multi_agent", "-c", `web_search="${research ? "live" : "disabled"}"`, "-C", cwd];
   if (!readFiles) args.push("--disable", "shell_tool", "--disable", "unified_exec");
   if (CODEX_MODEL) args.push("-m", CODEX_MODEL);
   if (schema) {
@@ -285,7 +294,7 @@ followUpOf: the single id the new content directly continues (it points at or re
   } else {
     const res = await runClaude({
       content: [...imageBlocks(focusB64, contextB64), { type: "text", text }],
-      args: ["--model", SELECT_MODEL, "--tools", "", "--no-session-persistence", "--json-schema", JSON.stringify(SELECT_SCHEMA)],
+      args: ["--model", SELECT_MODEL, "--tools", "", "--disable-slash-commands", "--no-session-persistence", "--json-schema", JSON.stringify(SELECT_SCHEMA)],
       cwd: CLAUDE_CWD,
       timeoutMs: SELECT_TIMEOUT_MS,
       onChild,
@@ -350,6 +359,7 @@ Decide from the request whether an edit is wanted. When the user asks to change 
   off: `EDITING IS OFF. The user has not allowed you to change existing content. Don't output <edit>. If a change would help, mark it with ink or say it in the card, and mention that they can allow edits in the ▾ menu.`,
 };
 
+const ELABORATE_HELP = fs.readFileSync(path.join(AGENT_PLUGIN_DIR, "skills/elaborate/SKILL.md"), "utf8").replace(/^---[\s\S]*?---\s*/, "").replace(/\s+/g, " ").trim();
 const DRAW_HELP = fs.readFileSync(path.join(AGENT_PLUGIN_DIR, "skills/board-diagrams/SKILL.md"), "utf8").replace(/^---[\s\S]*?---\s*/, "");
 
 function regionText(regions) {
@@ -406,11 +416,12 @@ How to respond:
   - A request to change existing content: follow the editing rule above.
   - A request to research, look up, compare or check current facts ("research online…", "what's the latest…"): use WebSearch and WebFetch first (a few focused searches, read the best 2–4 sources), then answer, and draw if they asked for a drawing. End the card with one line "Sources: domain.com, other.org".
   - A request to explain, teach or "explain me this": explain simply, and add a drawing whenever a picture would make it click.
+  - A request to elaborate, expand, go deeper or "tell me more" about something on the board: load the "margin-board:elaborate" skill with the Skill tool first and follow it.${engine === "codex" ? ` (No Skill tool here: follow this instead. ${ELABORATE_HELP})` : ""}
 - If an earlier answer already covers something, don't repeat it. Write one line such as "Covered in my earlier card on X" and add only what's new.
 - Start with the answer itself. Don't restate the question, and don't open with "What I see".
-- ${comment ? "Reply like a colleague in a comment thread: 1–5 short sentences or bullets, about 80 words at most. If they asked you to draw, edit or mark something up, do it with the blocks below and say in one line what you did." : "Keep it short: about 120 words, in short bullets (up to 200 for research or an explanation the user asked for). The user can ask for more detail."}
+- ${comment ? "Reply like a colleague in a comment thread: 1–5 short sentences or bullets, about 80 words at most. If they asked you to draw, edit or mark something up, do it with the blocks below and say in one line what you did." : "Keep it short: about 120 words, in short bullets (up to 200 for research or an explanation the user asked for, up to 350 when elaborating). The user can ask for more detail."}
 - Use plain text only, with no markdown (#, **, backticks, tables or links). Use "- " bullets, "1." lists and, rarely, a short CAPITALISED label.
-- Tools: most answers need none. Use WebSearch/WebFetch for research requests, and read files only when the board refers to a specific codebase, file or project. ${projectAccess ? "The user enabled reads from " + cwd + "." : "Project access is off for this ask."}
+- Tools: most answers need none. Use WebSearch/WebFetch for research requests, and read files only when the board refers to a specific codebase, file or project. ${projectAccess ? "You start in " + cwd + " and can read any other directory on this machine the task needs." : "Project access is off for this ask."}
 
 ${DRAW_HELP}
 
@@ -540,8 +551,9 @@ async function handleAsk(req, res) {
   const maxBudget = Number(body.maxBudget) > 0 ? Math.min(100, Number(body.maxBudget)) : 0;
   let links = (Array.isArray(body.links) ? body.links : []).map(String).filter((u) => /^https?:\/\/\S+$/i.test(u)).slice(0, 8);
 
-  let cwd = body.projectAccess === true ? CLAUDE_CWD : path.join(DATA_DIR, "workspace");
-  if (body.projectAccess && body.cwd?.trim()) {
+  // File access is always on: Claude starts in the project folder and can read any directory.
+  let cwd = CLAUDE_CWD;
+  if (body.cwd?.trim()) {
     cwd = path.resolve(expandHome(body.cwd.trim()));
     if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) return send(res, 400, { error: `Project folder not found: ${cwd}` });
   }
@@ -653,20 +665,23 @@ async function handleAsk(req, res) {
       : prior.find((p) => p.id === selection.followUpOf);
     const canResume = parent?.sessionId && (parent.engine || "claude") === "claude" && path.resolve(parent.cwd || CLAUDE_CWD) === cwd;
     const promptArgs = {
-      projectAccess: body.projectAccess === true,
+      projectAccess: true,
       hasFocus: !!focusB64, focusCount: 1 + extraFocusB64.length, summary, question, scope, earlier, cwd,
       regions: marksB64 ? regions : [], editMode, thread, attachments: attachmentPaths, links, steps,
     };
     const research = links.length > 0 || /\b(research|look up|search (online|the web)|latest|online)\b/i.test(question || "");
-    const project = body.projectAccess === true;
+    const project = true;
     const readFiles = project || attachmentPaths.length > 0;
     const answer = async (resume) => {
       const prompt = buildPrompt({ ...promptArgs, resumed: resume });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
-      const tools = [...(readFiles ? ["Read"] : []), ...(project ? ["Grep", "Glob"] : []), ...(research ? ["WebSearch", "WebFetch"] : [])];
-      const allowed = [...(project ? [`Read(/${cwd}/**)`, "Grep", "Glob"] : []),
+      const tools = ["Skill", ...(readFiles ? ["Read"] : []), ...(project ? ["Grep", "Glob"] : []), ...(research ? ["WebSearch", "WebFetch"] : [])];
+      // Project access lets Claude read any directory on the machine; cwd is only where it starts.
+      const allowed = ["Skill", ...(project ? ["Read", "Grep", "Glob"] : []),
         ...attachmentPaths.map((f) => `Read(/${f})`), ...(research ? ["WebSearch", "WebFetch"] : [])];
-      const args = ["--tools", tools.join(","), "--add-dir", dir];
+      // Restricted mode confines file tools to the working directories, so add every filesystem root.
+      const args = ["--tools", tools.join(","), "--add-dir", dir, ...(project ? FS_ROOTS.flatMap((r) => ["--add-dir", r]) : []),
+        "--plugin-dir", AGENT_PLUGIN_DIR];
       if (allowed.length) args.push("--allowedTools", ...allowed);
       if (model) args.push("--model", model);
       if (effort) args.push("--effort", effort);
@@ -745,7 +760,7 @@ async function handleAsk(req, res) {
       const prompt = buildPrompt({ ...promptArgs, resumed: false, engine: "codex" });
       await fsp.writeFile(path.join(dir, "prompt.txt"), prompt);
       const r = await runCodex({
-        prompt, images: answerImages, cwd: project ? cwd : dir, readFiles, research, timeoutMs: CLAUDE_TIMEOUT_MS, onChild: track, workDir: dir,
+        prompt, images: answerImages, cwd: project ? cwd : dir, readFiles, readAnywhere: project, research, timeoutMs: CLAUDE_TIMEOUT_MS, onChild: track, workDir: dir,
         onStatus: (t) => emit({ type: "status", text: t }),
       });
       const vis = visibleAnswer(r.text);

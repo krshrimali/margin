@@ -123,8 +123,8 @@ Strokes are native Excalidraw elements, so select, move, erase, undo and export 
 - **Drawing layouts.** Both engines receive the same guide from `agent-plugin/skills/board-diagrams/SKILL.md`.
   Comparisons stack when space is tight. Processes use named stages and labeled connections, and annotated
   examples reference a line in a snippet. Choose *Show now* during drawing to skip the animation.
-- **Project access.** Set the project folder in the Ask menu, then enable *Read project files* for the ask
-  that needs it. Ordinary drawings use restricted tools. Claude uses restricted mode with a per-request
+- **File access.** Every ask can read files. Set the project folder in the Ask menu: Claude starts there
+  and can read any directory on the machine (read-only, no writes). Claude uses restricted mode with a per-request
   tool list. Codex uses a read-only sandbox. Research requests can use web tools.
 - **Saving and review.** Concurrent saves check board revisions. A conflict leaves the editing session open
   so you can export your changes. Edit previews appear as separate images. The board stores pending edits

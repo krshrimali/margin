@@ -852,7 +852,7 @@ const shortModel = (m) => {
  */
 export async function askClaude(api, {
   scope = "auto", question = "", cwd, model = "", effort = "", editMode = "auto", picks = [], thread = null, reply = null,
-  attachments = [], links = [], steps = false, maxBudget = 0, projectAccess = false, excludeAsk = null, replayId = null, legacyReplayId = null,
+  attachments = [], links = [], steps = false, maxBudget = 0, excludeAsk = null, replayId = null, legacyReplayId = null,
 }) {
   const askedAt = Date.now();
   await fontsReady();
@@ -939,7 +939,7 @@ export async function askClaude(api, {
 
   try {
     const body = JSON.stringify({
-        replayId, legacyReplayId, projectAccess, image, focusImage: focusImages[0] || null, extraFocusImages: focusImages.slice(1), marksImage, regions: regionList, summary, question,
+        replayId, legacyReplayId, image, focusImage: focusImages[0] || null, extraFocusImages: focusImages.slice(1), marksImage, regions: regionList, summary, question,
         scope: t.scope, prior, cwd, model, effort, editMode, attachments, links, steps, maxBudget,
         thread: thread ? { messages: thread.messages, sessionId: thread.sessionId || null, engine: thread.engine || null, cwd: thread.cwd || null } : null,
       });

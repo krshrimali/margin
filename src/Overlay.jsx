@@ -113,9 +113,6 @@ export function AskOptions({ compact = false }) {
           <input type="number" min="0" step="0.05" placeholder="none" value={p.maxBudget || ""} onChange={(e) => prefs.set((s) => ({ ...s, maxBudget: Math.max(0, Number(e.target.value) || 0) }))} />
         </label>
       </div>
-      <label className="steps-toggle" title="Allow reading the configured project for this ask">
-        <input type="checkbox" checked={p.projectAccess} onChange={(e) => prefs.set((s) => ({ ...s, projectAccess: e.target.checked }))} /> Read project files
-      </label>
       <label className={`steps-toggle ${p.steps ? "on" : ""}`} title="Claude draws it as a step-by-step walkthrough you play one step at a time (this ask only)">
         <input type="checkbox" checked={p.steps} onChange={(e) => prefs.set((s) => ({ ...s, steps: e.target.checked }))} /> ▶ Walk me through it, step by step
       </label>

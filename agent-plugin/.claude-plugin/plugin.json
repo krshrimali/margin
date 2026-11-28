@@ -1,5 +1,5 @@
 {
   "name": "margin-board",
   "version": "0.1.0",
-  "description": "Skills for the agent that answers on the Margin whiteboard: how to draw diagrams that convert cleanly onto the board."
+  "description": "Skills for the agent that answers on the Margin whiteboard: how to draw diagrams that convert cleanly onto the board, and how to elaborate on something in depth."
 }
